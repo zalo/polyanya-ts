@@ -96,6 +96,12 @@ export function createThreeRenderer(): ThreeRenderer {
   cssRenderer.domElement.style.borderRadius = "8px"
   container.appendChild(cssRenderer.domElement)
 
+  // Force all CSS2DRenderer wrapper divs to be non-interactive
+  const cssStyle = document.createElement("style")
+  cssRenderer.domElement.setAttribute("data-css2d", "")
+  cssStyle.textContent = "[data-css2d], [data-css2d] * { pointer-events: none !important; }"
+  container.appendChild(cssStyle)
+
   // --- Scene + camera ---
   const scene = new THREE.Scene()
   const camera = new THREE.OrthographicCamera(-1, 1, 1, -1, 0.1, 100)
@@ -320,15 +326,15 @@ export function createThreeRenderer(): ThreeRenderer {
     if (visibleW <= 0) return
     const px = visibleW / cw // world-units per CSS pixel
 
-    interiorEdgeMat.linewidth = px * 1.0
-    boundaryEdgeMat.linewidth = px * 2.0
+    interiorEdgeMat.linewidth = px * 1.5
+    boundaryEdgeMat.linewidth = px * 3.0
     pathMat.linewidth = px * 3.0
     openMat.linewidth = px * 2.0
     pushedMat.linewidth = px * 3.0
     prunedMat.linewidth = px * 3.0
     poppedMat.linewidth = px * 3.0
-    obsStrokeMat.linewidth = px * 2.0
-    obsSelectedStrokeMat.linewidth = px * 2.0
+    obsStrokeMat.linewidth = px * 3.0
+    obsSelectedStrokeMat.linewidth = px * 3.0
     prunedMat.dashSize = px * 6
     prunedMat.gapSize = px * 4
   }

@@ -415,9 +415,9 @@ export default function PolyanyaDemo() {
   // --- build method ---
   const [buildMethod, setBuildMethod] = useState<BuildMethod>("cdt")
   const canFile = !isEditor && !!entry.path
-  const canMerge = !isEditor
+  const canMerge = true
   const effectiveMethod: BuildMethod = isEditor
-    ? buildMethod === "file" || buildMethod === "merge"
+    ? buildMethod === "file"
       ? "cdt"
       : buildMethod
     : buildMethod === "cdt"
@@ -822,8 +822,22 @@ export default function PolyanyaDemo() {
         }
       }
 
-      // Click on empty space deselects obstacle
+      // Click on empty space — deselect obstacle + drag nearest point
       if (isEditor) setSelectedObs(null)
+      const p = r.screenToMesh(e.clientX, e.clientY)
+      if (p) {
+        const dxS = p.x - start.x,
+          dyS = p.y - start.y
+        const dxG = p.x - goal.x,
+          dyG = p.y - goal.y
+        const nearest =
+          dxS * dxS + dyS * dyS <= dxG * dxG + dyG * dyG ? "start" : "goal"
+        e.preventDefault()
+        e.stopPropagation()
+        e.currentTarget.setPointerCapture(e.pointerId)
+        if (mode !== "live") exitStepMode()
+        draggingRef.current = nearest
+      }
     },
     [start, goal, markerR, mode, exitStepMode, isEditor, obstacles],
   )
