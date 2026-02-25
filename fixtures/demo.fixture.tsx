@@ -9,6 +9,7 @@ import {
 } from "react"
 import {
   Mesh,
+  PointLocationType,
   SearchInstance,
   StepEventType,
   buildMeshFromRegions,
@@ -101,7 +102,7 @@ function getMeshBounds(mesh: Mesh) {
   return { minX, maxX, minY, maxY }
 }
 
-function extractObstaclePolylines(mesh: Mesh): { bounds: ReturnType<typeof getMeshBounds>; obstacles: Point[][]; outerBoundary: Point[] | null } {
+function extractObstaclePolylines(mesh: Mesh): { bounds: ReturnType<typeof getMeshBounds>; obstacles: Point[][] } {
   // 1. Collect directed boundary edges: V[i]→V[(i+1)%n] where adj polygon is -1
   const outgoing = new Map<number, number[]>()
   for (const poly of mesh.polygons) {
@@ -142,7 +143,7 @@ function extractObstaclePolylines(mesh: Mesh): { bounds: ReturnType<typeof getMe
     }
   }
 
-  // 3. Compute signed area (shoelace), identify outer boundary, ensure CCW for obstacles
+  // 3. Compute signed area (shoelace), identify outer boundary (largest loop), keep obstacles
   const signedArea = (pts: Point[]) => {
     let a = 0
     for (let i = 0; i < pts.length; i++) {
@@ -160,21 +161,14 @@ function extractObstaclePolylines(mesh: Mesh): { bounds: ReturnType<typeof getMe
   })
 
   const obstacles: Point[][] = []
-  let outerBoundary: Point[] | null = null
   for (let i = 0; i < loops.length; i++) {
-    if (i === maxIdx) {
-      // Keep outer boundary (ensure CCW for point-in-polygon tests)
-      const loop = loops[i]!
-      if (areas[i]! < 0) loop.reverse()
-      outerBoundary = loop
-      continue
-    }
+    if (i === maxIdx) continue // skip outer boundary
     const loop = loops[i]!
     if (areas[i]! < 0) loop.reverse() // ensure CCW
     obstacles.push(loop)
   }
 
-  return { bounds: getMeshBounds(mesh), obstacles, outerBoundary }
+  return { bounds: getMeshBounds(mesh), obstacles }
 }
 
 function buildEdgePaths(mesh: Mesh) {
@@ -212,19 +206,6 @@ function buildPolyPath(mesh: Mesh) {
     if (valid) d += seg + "Z"
   }
   return d
-}
-
-/** Ray-casting point-in-polygon test (CCW polygon expected) */
-function pointInPolygon(p: Point, poly: Point[]): boolean {
-  let inside = false
-  for (let i = 0, j = poly.length - 1; i < poly.length; j = i++) {
-    const pi = poly[i]!, pj = poly[j]!
-    if ((pi.y > p.y) !== (pj.y > p.y) &&
-        p.x < (pj.x - pi.x) * (p.y - pi.y) / (pj.y - pi.y) + pi.x) {
-      inside = !inside
-    }
-  }
-  return inside
 }
 
 function pathLen(pts: Point[]) {
@@ -462,7 +443,7 @@ export default function PolyanyaDemo() {
       } else {
         // CDT rebuild
         const t0 = performance.now()
-        const { bounds, obstacles: obstacleLoops, outerBoundary } = extractObstaclePolylines(fileMesh)
+        const { bounds, obstacles: obstacleLoops } = extractObstaclePolylines(fileMesh)
         const result = computeConvexRegions({
           bounds,
           polygons: obstacleLoops.map((pts) => ({ points: pts })),
@@ -470,16 +451,14 @@ export default function PolyanyaDemo() {
           concavityTolerance,
           useConstrainedDelaunay: true,
         })
-        // Filter out regions outside the outer boundary
+        // Filter out regions outside the original mesh using point location
         let regions = result.regions
-        if (outerBoundary) {
-          regions = regions.filter((region) => {
-            let cx = 0, cy = 0
-            for (const p of region) { cx += p.x; cy += p.y }
-            cx /= region.length; cy /= region.length
-            return pointInPolygon({ x: cx, y: cy }, outerBoundary)
-          })
-        }
+        regions = regions.filter((region) => {
+          let cx = 0, cy = 0
+          for (const p of region) { cx += p.x; cy += p.y }
+          cx /= region.length; cy /= region.length
+          return fileMesh.getPointLocation({ x: cx, y: cy }).type !== PointLocationType.NOT_ON_MESH
+        })
         const m = buildMeshFromRegions({ regions })
         const bt = performance.now() - t0
         meshCache.current.set(cacheKey, m)
