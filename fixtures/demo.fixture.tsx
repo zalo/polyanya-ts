@@ -1146,9 +1146,7 @@ export default function PolyanyaDemo() {
             />
           )}
           <Row label="Mesh build" value={fmtTime(buildTimeMs)} />
-          {displayStats.searchTimeMs > 0 && (
-            <Row label="Search" value={fmtTime(displayStats.searchTimeMs)} />
-          )}
+          <Row label="Search" value={fmtTime(displayStats.searchTimeMs)} />
           {(effectiveMethod === "cdt" || effectiveMethod === "merge") &&
             fileMeshRef.current &&
             mesh &&

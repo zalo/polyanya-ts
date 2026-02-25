@@ -82,7 +82,7 @@ export function createThreeRenderer(): ThreeRenderer {
   // --- WebGL renderer ---
   const glRenderer = new THREE.WebGLRenderer({ antialias: true })
   glRenderer.setClearColor(0x16213e)
-  glRenderer.setPixelRatio(window.devicePixelRatio)
+  glRenderer.setPixelRatio(Math.min(window.devicePixelRatio, 2))
   container.appendChild(glRenderer.domElement)
   glRenderer.domElement.style.position = "absolute"
   glRenderer.domElement.style.inset = "0"
@@ -361,8 +361,7 @@ export function createThreeRenderer(): ThreeRenderer {
     if (w === 0 || h === 0) return
     glRenderer.setSize(w, h)
     cssRenderer.setSize(w, h)
-    const dpr = window.devicePixelRatio || 1
-    updateResolution(w * dpr, h * dpr)
+    updateResolution(w, h)
     if (currentBounds) updateCamera(currentBounds)
     render()
   })
