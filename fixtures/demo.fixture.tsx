@@ -93,6 +93,7 @@ const DEFAULT_OBSTACLES: Obstacle[] = [
 function getMeshBounds(mesh: Mesh) {
   let minX = Infinity, maxX = -Infinity, minY = Infinity, maxY = -Infinity
   for (const v of mesh.vertices) {
+    if (!v) continue
     minX = Math.min(minX, v.p.x); maxX = Math.max(maxX, v.p.x)
     minY = Math.min(minY, v.p.y); maxY = Math.max(maxY, v.p.y)
   }
@@ -103,14 +104,16 @@ function buildEdgePaths(mesh: Mesh) {
   const seen = new Set<string>()
   let boundaryD = "", interiorD = ""
   for (const poly of mesh.polygons) {
+    if (!poly) continue
     const V = poly.vertices, P = poly.polygons
     for (let i = 0; i < V.length; i++) {
       const a = V[i]!, b = V[(i + 1) % V.length]!
       const key = a < b ? `${a},${b}` : `${b},${a}`
       if (seen.has(key)) continue
       seen.add(key)
-      const pa = mesh.vertices[a]!.p, pb = mesh.vertices[b]!.p
-      const seg = `M${pa.x} ${-pa.y}L${pb.x} ${-pb.y}`
+      const va = mesh.vertices[a], vb = mesh.vertices[b]
+      if (!va || !vb) continue
+      const seg = `M${va.p.x} ${-va.p.y}L${vb.p.x} ${-vb.p.y}`
       if (P[(i + 1) % V.length] === -1) boundaryD += seg; else interiorD += seg
     }
   }
@@ -120,12 +123,16 @@ function buildEdgePaths(mesh: Mesh) {
 function buildPolyPath(mesh: Mesh) {
   let d = ""
   for (const poly of mesh.polygons) {
+    if (!poly) continue
     const V = poly.vertices
+    let seg = ""
+    let valid = true
     for (let i = 0; i < V.length; i++) {
-      const p = mesh.vertices[V[i]!]!.p
-      d += i === 0 ? `M${p.x} ${-p.y}` : `L${p.x} ${-p.y}`
+      const v = mesh.vertices[V[i]!]
+      if (!v) { valid = false; break }
+      seg += i === 0 ? `M${v.p.x} ${-v.p.y}` : `L${v.p.x} ${-v.p.y}`
     }
-    d += "Z"
+    if (valid) d += seg + "Z"
   }
   return d
 }
@@ -174,6 +181,57 @@ function buildMeshFromObstacles(obstacles: Obstacle[], clearance: number, concav
   const mesh = buildMeshFromRegions({ regions: result.regions })
   const buildTimeMs = performance.now() - t0
   return { mesh, buildTimeMs, regionCount: result.regions.length }
+}
+
+// ---------------------------------------------------------------------------
+// Run search and produce path + stats
+// ---------------------------------------------------------------------------
+
+function runSearch(mesh: Mesh, start: Point, goal: Point, buildTimeMs: number): { path: Point[]; stats: Stats } {
+  const s = new SearchInstance(mesh)
+  s.setStartGoal(start, goal)
+  const t0 = performance.now()
+  s.search()
+  const searchTimeMs = performance.now() - t0
+  const pts = s.getPathPoints()
+  return {
+    path: pts,
+    stats: {
+      generated: s.nodesGenerated, pushed: s.nodesPushed,
+      popped: s.nodesPopped, pruned: s.nodesPrunedPostPop,
+      openSize: 0, cost: s.getCost(), pathLength: pathLen(pts),
+      searchTimeMs, buildTimeMs,
+    },
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Direct-DOM overlay: updates markers + path without React re-renders
+// ---------------------------------------------------------------------------
+
+/** Refs for the overlay SVG elements that are mutated directly during drag */
+interface OverlayRefs {
+  pathEl: SVGPathElement | null
+  startCircle: SVGCircleElement | null
+  goalCircle: SVGCircleElement | null
+  startLabel: SVGTextElement | null
+  goalLabel: SVGTextElement | null
+}
+
+function updateOverlayDOM(
+  refs: OverlayRefs,
+  start: Point,
+  goal: Point,
+  pathPts: Point[],
+  markerR: number,
+) {
+  if (refs.startCircle) { refs.startCircle.setAttribute("cx", String(start.x)); refs.startCircle.setAttribute("cy", String(-start.y)) }
+  if (refs.goalCircle) { refs.goalCircle.setAttribute("cx", String(goal.x)); refs.goalCircle.setAttribute("cy", String(-goal.y)) }
+  if (refs.startLabel) { refs.startLabel.setAttribute("x", String(start.x)); refs.startLabel.setAttribute("y", String(-start.y - markerR * 1.6)) }
+  if (refs.goalLabel) { refs.goalLabel.setAttribute("x", String(goal.x)); refs.goalLabel.setAttribute("y", String(-goal.y - markerR * 1.6)) }
+  if (refs.pathEl) {
+    refs.pathEl.setAttribute("d", pathPts.length < 2 ? "" : "M" + pathPts.map((p) => `${p.x} ${-p.y}`).join("L"))
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -238,6 +296,16 @@ export default function PolyanyaDemo() {
   const logEndRef = useRef<HTMLDivElement | null>(null)
   const stepStartTime = useRef(0)
 
+  // --- overlay refs for direct DOM updates during drag ---
+  const overlayRefs = useRef<OverlayRefs>({ pathEl: null, startCircle: null, goalCircle: null, startLabel: null, goalLabel: null })
+  const dragRaf = useRef(0)
+  // Mutable copies of start/goal that update during drag without React re-renders
+  const liveStart = useRef(start)
+  const liveGoal = useRef(goal)
+  // Keep in sync when React state changes
+  useEffect(() => { liveStart.current = start }, [start])
+  useEffect(() => { liveGoal.current = goal }, [goal])
+
   // --- load mesh from file or build from editor ---
   useEffect(() => {
     if (isEditor) {
@@ -273,22 +341,12 @@ export default function PolyanyaDemo() {
     exitStepMode()
   }, [selectedId])
 
-  // --- compute path whenever mesh/start/goal change ---
+  // --- compute path whenever mesh/start/goal change (not during drag) ---
   useEffect(() => {
     if (!mesh) return
-    const s = new SearchInstance(mesh)
-    s.setStartGoal(start, goal)
-    const t0 = performance.now()
-    s.search()
-    const searchTimeMs = performance.now() - t0
-    const pts = s.getPathPoints()
-    setLivePath(pts)
-    setLiveStats({
-      generated: s.nodesGenerated, pushed: s.nodesPushed,
-      popped: s.nodesPopped, pruned: s.nodesPrunedPostPop,
-      openSize: 0, cost: s.getCost(), pathLength: pathLen(pts),
-      searchTimeMs, buildTimeMs,
-    })
+    const { path, stats } = runSearch(mesh, start, goal, buildTimeMs)
+    setLivePath(path)
+    setLiveStats(stats)
   }, [mesh, start, goal, buildTimeMs])
 
   useEffect(() => { logEndRef.current?.scrollIntoView({ behavior: "smooth" }) }, [eventLog.length])
@@ -303,8 +361,9 @@ export default function PolyanyaDemo() {
   const vbW = bounds.maxX - bounds.minX + 2 * pad
   const vbH = bounds.maxY - bounds.minY + 2 * pad
   const sw = vbW * 0.003, markerR = vbW * 0.015
+  const viewBox = `${vbX} ${vbY} ${vbW} ${vbH}`
 
-  const svgToMesh = useCallback((e: React.MouseEvent): Point | null => {
+  const svgToMesh = useCallback((e: React.MouseEvent | MouseEvent): Point | null => {
     const svg = svgRef.current; if (!svg) return null
     const pt = svg.createSVGPoint(); pt.x = e.clientX; pt.y = e.clientY
     const ctm = svg.getScreenCTM(); if (!ctm) return null
@@ -355,6 +414,10 @@ export default function PolyanyaDemo() {
   }, [mesh, start, goal, readStats])
 
   // --- dragging start/goal ---
+  // Uses direct DOM manipulation during drag → no React re-renders.
+  // Search runs at rAF rate (capped at 60fps) on a background timer.
+  // On mouse-up the final position is flushed to React state.
+
   const onMarkerDown = useCallback((which: "start" | "goal") => (e: React.MouseEvent) => {
     e.preventDefault(); e.stopPropagation()
     if (mode !== "live") exitStepMode()
@@ -362,21 +425,47 @@ export default function PolyanyaDemo() {
   }, [mode, exitStepMode])
 
   const onSvgMove = useCallback((e: React.MouseEvent) => {
-    // Drag start/goal markers
+    // --- drag start/goal: direct DOM path ---
     if (draggingRef.current) {
       const p = svgToMesh(e); if (!p) return
-      if (draggingRef.current === "start") setStart(p); else setGoal(p)
+      if (draggingRef.current === "start") liveStart.current = p
+      else liveGoal.current = p
+
+      // Throttle visual updates + search to once per rAF
+      if (!dragRaf.current) {
+        dragRaf.current = requestAnimationFrame(() => {
+          dragRaf.current = 0
+          const curStart = liveStart.current
+          const curGoal = liveGoal.current
+          // Run search and update overlay DOM directly
+          if (mesh) {
+            const { path } = runSearch(mesh, curStart, curGoal, buildTimeMs)
+            updateOverlayDOM(overlayRefs.current, curStart, curGoal, path, markerR)
+          } else {
+            updateOverlayDOM(overlayRefs.current, curStart, curGoal, [], markerR)
+          }
+        })
+      }
       return
     }
-    // Drag obstacle in editor
+    // --- drag obstacle in editor ---
     const drag = draggingObs.current
     if (drag && isEditor) {
       const p = svgToMesh(e); if (!p) return
       setObstacles((prev) => prev.map((o) => o.id === drag.id ? { ...o, cx: p.x + drag.offX, cy: p.y + drag.offY } : o))
     }
-  }, [svgToMesh, isEditor])
+  }, [svgToMesh, isEditor, mesh, buildTimeMs, markerR])
 
-  const onSvgUp = useCallback(() => { draggingRef.current = null; draggingObs.current = null }, [])
+  const onSvgUp = useCallback(() => {
+    // Flush final drag position to React state (triggers proper re-render + stats update)
+    if (draggingRef.current) {
+      if (dragRaf.current) { cancelAnimationFrame(dragRaf.current); dragRaf.current = 0 }
+      setStart({ ...liveStart.current })
+      setGoal({ ...liveGoal.current })
+    }
+    draggingRef.current = null
+    draggingObs.current = null
+  }, [])
 
   // --- editor: add obstacle on double-click ---
   const onSvgDblClick = useCallback((e: React.MouseEvent) => {
@@ -414,16 +503,27 @@ export default function PolyanyaDemo() {
     <div style={rootStyle}>
       <div style={canvasWrap}>
         {loading && <div style={loadingStyle}>Loading mesh...</div>}
-        <svg ref={svgRef} viewBox={`${vbX} ${vbY} ${vbW} ${vbH}`} style={svgStyle}
-          onMouseMove={onSvgMove} onMouseUp={onSvgUp} onMouseLeave={onSvgUp} onDoubleClick={onSvgDblClick}>
 
+        {/* Bottom layer: static mesh — only re-renders when mesh changes */}
+        <svg viewBox={viewBox} style={svgStyleBg}>
           <MeshLayer polyPath={polyPath} interiorD={edgePaths.interiorD} boundaryD={edgePaths.boundaryD} sw={sw} />
 
           {/* Editor: obstacle rectangles */}
           {isEditor && obstacles.map((o) => (
             <rect key={o.id} x={o.cx - o.w / 2} y={-(o.cy + o.h / 2)} width={o.w} height={o.h}
               fill={selectedObs === o.id ? "#f72585" : "#e94560"} fillOpacity={0.4}
-              stroke={selectedObs === o.id ? "#f72585" : "#e94560"} strokeWidth={sw * 2}
+              stroke={selectedObs === o.id ? "#f72585" : "#e94560"} strokeWidth={sw * 2} />
+          ))}
+        </svg>
+
+        {/* Top layer: dynamic overlay — path, markers, step overlays, mouse events */}
+        <svg ref={svgRef} viewBox={viewBox} style={svgStyleFg}
+          onMouseMove={onSvgMove} onMouseUp={onSvgUp} onMouseLeave={onSvgUp} onDoubleClick={onSvgDblClick}>
+
+          {/* Editor: invisible obstacle hit targets (for mouse events on top layer) */}
+          {isEditor && obstacles.map((o) => (
+            <rect key={o.id} x={o.cx - o.w / 2} y={-(o.cy + o.h / 2)} width={o.w} height={o.h}
+              fill="transparent" stroke="none"
               style={{ cursor: "move" }} onMouseDown={(e) => onObstacleDown(o, e)} />
           ))}
 
@@ -437,12 +537,12 @@ export default function PolyanyaDemo() {
           {inStep && highlight.prunedNode && <line x1={highlight.prunedNode.left.x} y1={-highlight.prunedNode.left.y} x2={highlight.prunedNode.right.x} y2={-highlight.prunedNode.right.y} stroke="#888" strokeWidth={sw * 3} opacity={0.5} strokeLinecap="round" strokeDasharray={`${sw * 3} ${sw * 2}`} />}
           {inStep && highlight.poppedNode && <line x1={highlight.poppedNode.left.x} y1={-highlight.poppedNode.left.y} x2={highlight.poppedNode.right.x} y2={-highlight.poppedNode.right.y} stroke="#f72585" strokeWidth={sw * 3} opacity={0.9} strokeLinecap="round" />}
 
-          {pathD && <path d={pathD} fill="none" stroke="#06d6a0" strokeWidth={sw * 3} strokeLinecap="round" strokeLinejoin="round" />}
+          <path ref={(el) => { overlayRefs.current.pathEl = el }} d={pathD} fill="none" stroke="#06d6a0" strokeWidth={sw * 3} strokeLinecap="round" strokeLinejoin="round" />
 
-          <circle cx={start.x} cy={-start.y} r={markerR} fill="#06d6a0" stroke="#fff" strokeWidth={sw} style={{ cursor: "grab" }} onMouseDown={onMarkerDown("start")} />
-          <circle cx={goal.x} cy={-goal.y} r={markerR} fill="#f72585" stroke="#fff" strokeWidth={sw} style={{ cursor: "grab" }} onMouseDown={onMarkerDown("goal")} />
-          <text x={start.x} y={-start.y - markerR * 1.6} textAnchor="middle" fill="#06d6a0" fontSize={markerR * 1.2} fontWeight={700}>S</text>
-          <text x={goal.x} y={-goal.y - markerR * 1.6} textAnchor="middle" fill="#f72585" fontSize={markerR * 1.2} fontWeight={700}>G</text>
+          <circle ref={(el) => { overlayRefs.current.startCircle = el }} cx={start.x} cy={-start.y} r={markerR} fill="#06d6a0" stroke="#fff" strokeWidth={sw} style={{ cursor: "grab" }} onMouseDown={onMarkerDown("start")} />
+          <circle ref={(el) => { overlayRefs.current.goalCircle = el }} cx={goal.x} cy={-goal.y} r={markerR} fill="#f72585" stroke="#fff" strokeWidth={sw} style={{ cursor: "grab" }} onMouseDown={onMarkerDown("goal")} />
+          <text ref={(el) => { overlayRefs.current.startLabel = el }} x={start.x} y={-start.y - markerR * 1.6} textAnchor="middle" fill="#06d6a0" fontSize={markerR * 1.2} fontWeight={700}>S</text>
+          <text ref={(el) => { overlayRefs.current.goalLabel = el }} x={goal.x} y={-goal.y - markerR * 1.6} textAnchor="middle" fill="#f72585" fontSize={markerR * 1.2} fontWeight={700}>G</text>
         </svg>
       </div>
 
@@ -612,7 +712,9 @@ function evtColor(type: StepEventType) {
 
 const rootStyle: CSSProperties = { display: "flex", height: "100vh", fontFamily: "system-ui, -apple-system, sans-serif", background: "#1a1a2e", color: "#eee" }
 const canvasWrap: CSSProperties = { flex: 1, padding: 12, display: "flex", position: "relative" }
-const svgStyle: CSSProperties = { width: "100%", height: "100%", background: "#16213e", borderRadius: 8 }
+const svgBase: CSSProperties = { position: "absolute", inset: 12, borderRadius: 8 }
+const svgStyleBg: CSSProperties = { ...svgBase, background: "#16213e" }
+const svgStyleFg: CSSProperties = { ...svgBase, background: "transparent" }
 const loadingStyle: CSSProperties = { position: "absolute", top: "50%", left: "50%", transform: "translate(-50%,-50%)", color: "#06d6a0", fontSize: 18, fontWeight: 600, zIndex: 10 }
 const panelStyle: CSSProperties = { width: 320, padding: 16, background: "#0f3460", overflowY: "auto", display: "flex", flexDirection: "column", gap: 10 }
 const labelStyle: CSSProperties = { display: "block", fontSize: 12, color: "#8d99ae", marginBottom: -4 }
