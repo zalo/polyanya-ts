@@ -17,8 +17,8 @@ export interface MeshBuilderInput {
  * The regions should be convex polygons sharing edges. Two regions that
  * share an edge will be considered adjacent (traversable between).
  *
- * This can be used with `find-convex-regions` which decomposes
- * a 2D space with obstacles into convex regions suitable for nav mesh pathfinding.
+ * Use `cdtTriangulate()` to decompose a 2D space with obstacles into
+ * triangle regions suitable for this function.
  */
 export function buildMeshFromRegions(input: MeshBuilderInput): Mesh {
   const { regions } = input

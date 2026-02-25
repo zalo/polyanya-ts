@@ -36,22 +36,23 @@ const path = search.getPathPoints()
 // [{ x: 0.5, y: 0.5 }, { x: -0.5, y: -0.5 }]
 ```
 
-## Usage with find-convex-regions
+## Building from Obstacles
 
-Build a navigation mesh from obstacles and pathfind around them:
+Build a navigation mesh from rectangular obstacles using the built-in CDT builder:
 
 ```ts
-import { computeConvexRegions } from "@tscircuit/find-convex-regions"
-import { buildMeshFromConvexRegions, SearchInstance } from "polyanya"
+import { cdtTriangulate, rectToPolygon, buildMeshFromRegions, SearchInstance } from "polyanya"
 
-const result = computeConvexRegions({
+const obstacles = [
+  rectToPolygon(0, 0, 4, 4, 0.5), // rect at (0,0), size 4x4, clearance 0.5
+]
+
+const regions = cdtTriangulate({
   bounds: { minX: -10, maxX: 10, minY: -10, maxY: 10 },
-  rects: [{ center: { x: 0, y: 0 }, width: 4, height: 4, ccwRotation: 0 }],
-  clearance: 0.5,
-  concavityTolerance: 0.5,
+  obstacles,
 })
 
-const mesh = buildMeshFromConvexRegions(result.regions)
+const mesh = buildMeshFromRegions({ regions })
 const search = new SearchInstance(mesh)
 search.setStartGoal({ x: -8, y: 0 }, { x: 8, y: 0 })
 search.search()
@@ -142,9 +143,13 @@ Build a mesh from vertex and polygon arrays.
 
 Build a mesh from convex regions (arrays of points in CCW order).
 
-### `buildMeshFromConvexRegions(regions: Point[][]): Mesh`
+### `cdtTriangulate(input: { bounds, obstacles: Point[][] }): Point[][]`
 
-Shorthand for use with `find-convex-regions` output.
+CDT-triangulate free space inside bounds around obstacle polygons. Returns triangle regions.
+
+### `rectToPolygon(cx, cy, w, h, clearance): Point[]`
+
+Expand a rectangle into a polygon with clearance buffer.
 
 ### `SearchInstance`
 
@@ -216,7 +221,7 @@ See the `examples/` directory:
 - `basic-search.ts` — Simple pathfinding
 - `step-through.ts` — Algorithm step visualization
 - `arena-pathfinding.ts` — Larger mesh from Dragon Age: Origins
-- `with-convex-regions.ts` — Integration with obstacle decomposition
+- `with-convex-regions.ts` — Building a mesh from obstacles
 
 Run with:
 

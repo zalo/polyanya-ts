@@ -4,7 +4,7 @@ import { buildMeshFromRegions } from "../lib/mesh-builder.ts"
 import { Mesh } from "../lib/mesh.ts"
 import { SearchInstance } from "../lib/search.ts"
 import { PointLocationType } from "../lib/types.ts"
-import { computeConvexRegions } from "@tscircuit/find-convex-regions"
+import { cdtTriangulate } from "../lib/cdt-builder.ts"
 import { readFileSync } from "fs"
 import { join } from "path"
 import type { Point } from "../lib/types.ts"
@@ -239,17 +239,10 @@ describe("mergeMesh", () => {
     const fileMesh = Mesh.fromString(text)
     const fileArea = meshArea(fileMesh)
 
-    // Run the CDT pipeline: extract obstacles → compute regions → filter by point location → build mesh
+    // Run the CDT pipeline: extract obstacles → triangulate → filter by point location → build mesh
     const { bounds, obstacles } = extractObstaclePolylines(fileMesh)
-    const result = computeConvexRegions({
-      bounds,
-      polygons: obstacles.map((pts) => ({ points: pts })),
-      clearance: 0,
-      concavityTolerance: 0,
-      useConstrainedDelaunay: true,
-    })
+    let regions = cdtTriangulate({ bounds, obstacles })
     // Filter out regions outside the original mesh
-    let regions = result.regions
     regions = regions.filter((region) => {
       let cx = 0, cy = 0
       for (const p of region) { cx += p.x; cy += p.y }

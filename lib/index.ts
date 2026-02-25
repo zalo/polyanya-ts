@@ -44,9 +44,11 @@ export { getHValue, getSuccessors } from "./expansion.ts"
 // Search
 export { SearchInstance } from "./search.ts"
 
-// Mesh builder (integration with find-convex-regions)
+// Mesh builder
 export { buildMeshFromRegions, type MeshBuilderInput } from "./mesh-builder.ts"
-export { buildMeshFromConvexRegions } from "./from-convex-regions.ts"
+
+// CDT builder (obstacle → triangulation → regions)
+export { cdtTriangulate, rectToPolygon } from "./cdt-builder.ts"
 
 // Mesh merger (Polyanya meshmerger algorithm)
 export { mergeMesh } from "./mesh-merger.ts"

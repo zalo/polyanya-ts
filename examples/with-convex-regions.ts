@@ -1,16 +1,16 @@
 /**
- * Integration with find-convex-regions.
+ * Building a navigation mesh from obstacles.
  *
- * Shows how to build a navigation mesh from convex region decomposition
- * of a 2D space with obstacles, then pathfind on it.
+ * Shows how to build a navigation mesh around rectangular obstacles
+ * using the CDT builder, then pathfind on it.
  *
  * Run with: bun examples/with-convex-regions.ts
  */
 import { buildMeshFromRegions } from "../lib/mesh-builder.ts"
 import { SearchInstance } from "../lib/search.ts"
 
-// Simulate convex regions output (normally from find-convex-regions)
-// These form a navigation mesh around a rectangular obstacle:
+// Simulate convex regions output — these form a navigation mesh
+// around a rectangular obstacle:
 //
 //    (-2,2)-----(0,2)-----(2,2)
 //    |        /     \       |

@@ -38,6 +38,6 @@
     "typescript": "^5"
   },
   "dependencies": {
-    "@tscircuit/find-convex-regions": "^0.0.9"
+    "cdt2d": "^1.0.0"
   }
 }

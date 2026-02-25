@@ -18,7 +18,7 @@ import {
   type SearchNode,
   type StepEvent,
 } from "../lib/index"
-import { computeConvexRegions } from "@tscircuit/find-convex-regions"
+import { cdtTriangulate, rectToPolygon } from "../lib/cdt-builder"
 
 const BASE = import.meta.env.BASE_URL
 
@@ -232,26 +232,18 @@ const MeshLayer = memo(function MeshLayer({ polyPath, interiorD, boundaryD, sw }
 })
 
 // ---------------------------------------------------------------------------
-// Build mesh from editor obstacles using find-convex-regions
+// Build mesh from editor obstacles using CDT
 // ---------------------------------------------------------------------------
 
-function buildMeshFromObstacles(obstacles: Obstacle[], clearance: number, concavityTolerance: number) {
+function buildMeshFromObstacles(obstacles: Obstacle[], clearance: number) {
   const t0 = performance.now()
-  const result = computeConvexRegions({
-    bounds: DEFAULT_BOUNDS,
-    rects: obstacles.map((o) => ({
-      center: { x: o.cx, y: o.cy },
-      width: o.w,
-      height: o.h,
-      ccwRotation: 0,
-    })),
-    clearance,
-    concavityTolerance,
-    useConstrainedDelaunay: true,
-  })
-  const mesh = buildMeshFromRegions({ regions: result.regions })
+  const obstaclePolygons = obstacles.map((o) =>
+    rectToPolygon(o.cx, o.cy, o.w, o.h, clearance),
+  )
+  const regions = cdtTriangulate({ bounds: DEFAULT_BOUNDS, obstacles: obstaclePolygons })
+  const mesh = buildMeshFromRegions({ regions })
   const buildTimeMs = performance.now() - t0
-  return { mesh, buildTimeMs, regionCount: result.regions.length }
+  return { mesh, buildTimeMs, regionCount: regions.length }
 }
 
 // ---------------------------------------------------------------------------
@@ -385,7 +377,7 @@ export default function PolyanyaDemo() {
   useEffect(() => {
     if (isEditor) {
       const t0 = performance.now()
-      const { mesh: cdtMesh, buildTimeMs: cdtBt } = buildMeshFromObstacles(obstacles, clearance, concavityTolerance)
+      const { mesh: cdtMesh, buildTimeMs: cdtBt } = buildMeshFromObstacles(obstacles, clearance)
       if (effectiveMethod === "merge") {
         const m = mergeMesh(cdtMesh)
         const bt = performance.now() - t0
@@ -444,15 +436,8 @@ export default function PolyanyaDemo() {
         // CDT rebuild
         const t0 = performance.now()
         const { bounds, obstacles: obstacleLoops } = extractObstaclePolylines(fileMesh)
-        const result = computeConvexRegions({
-          bounds,
-          polygons: obstacleLoops.map((pts) => ({ points: pts })),
-          clearance: 0,
-          concavityTolerance,
-          useConstrainedDelaunay: true,
-        })
+        let regions = cdtTriangulate({ bounds, obstacles: obstacleLoops })
         // Filter out regions outside the original mesh using point location
-        let regions = result.regions
         regions = regions.filter((region) => {
           let cx = 0, cy = 0
           for (const p of region) { cx += p.x; cy += p.y }
@@ -718,7 +703,7 @@ export default function PolyanyaDemo() {
             opacity: canCdt ? 1 : 0.35,
             cursor: canCdt ? "pointer" : "default",
           }}>
-            find-convex-regions CDT
+            CDT rebuild
           </button>
           <button onClick={() => canMerge && setBuildMethod("merge")} style={{
             ...toggleBtnStyle,
