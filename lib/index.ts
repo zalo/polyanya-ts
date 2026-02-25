@@ -47,3 +47,6 @@ export { SearchInstance } from "./search.ts"
 // Mesh builder (integration with find-convex-regions)
 export { buildMeshFromRegions, type MeshBuilderInput } from "./mesh-builder.ts"
 export { buildMeshFromConvexRegions } from "./from-convex-regions.ts"
+
+// Mesh merger (Polyanya meshmerger algorithm)
+export { mergeMesh } from "./mesh-merger.ts"

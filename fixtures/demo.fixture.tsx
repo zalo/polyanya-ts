@@ -12,6 +12,7 @@ import {
   SearchInstance,
   StepEventType,
   buildMeshFromRegions,
+  mergeMesh,
   type Point,
   type SearchNode,
   type StepEvent,
@@ -317,7 +318,7 @@ const ZERO_STATS: Stats = {
   openSize: 0, cost: -1, pathLength: 0, searchTimeMs: 0, buildTimeMs: 0,
 }
 
-type BuildMethod = "file" | "cdt"
+type BuildMethod = "file" | "cdt" | "merge"
 
 export default function PolyanyaDemo() {
   const [selectedId, setSelectedId] = useState("editor")
@@ -328,7 +329,10 @@ export default function PolyanyaDemo() {
   const [buildMethod, setBuildMethod] = useState<BuildMethod>("cdt")
   const canCdt = true
   const canFile = !isEditor && !!entry.path
-  const effectiveMethod: BuildMethod = isEditor ? "cdt" : buildMethod
+  const canMerge = true
+  const effectiveMethod: BuildMethod = isEditor
+    ? (buildMethod === "file" ? "cdt" : buildMethod)
+    : buildMethod
 
   // --- mesh state ---
   const [mesh, setMesh] = useState<Mesh | null>(null)
@@ -379,21 +383,31 @@ export default function PolyanyaDemo() {
   // --- load mesh from file or build from editor ---
   useEffect(() => {
     if (isEditor) {
-      const { mesh: m, buildTimeMs: bt } = buildMeshFromObstacles(obstacles, clearance, concavityTolerance)
-      setMesh(m)
-      setBuildTimeMs(bt)
-      fileMeshRef.current = null
+      const t0 = performance.now()
+      const { mesh: cdtMesh, buildTimeMs: cdtBt } = buildMeshFromObstacles(obstacles, clearance, concavityTolerance)
+      if (effectiveMethod === "merge") {
+        const m = mergeMesh(cdtMesh)
+        const bt = performance.now() - t0
+        setMesh(m); setBuildTimeMs(bt)
+        fileMeshRef.current = cdtMesh
+      } else {
+        setMesh(cdtMesh); setBuildTimeMs(cdtBt)
+        fileMeshRef.current = null
+      }
       return
     }
     if (!entry.path) return
 
-    const cacheKey = effectiveMethod === "cdt" ? `${entry.id}:cdt:${concavityTolerance}` : entry.id
+    const cacheKey = effectiveMethod === "cdt"
+      ? `${entry.id}:cdt:${concavityTolerance}`
+      : effectiveMethod === "merge"
+        ? `${entry.id}:merge`
+        : entry.id
     const cached = meshCache.current.get(cacheKey)
     if (cached) {
       setMesh(cached)
       setBuildTimeMs(0)
-      // Ensure fileMeshRef is populated for stats comparison
-      if (effectiveMethod === "cdt" && !fileMeshRef.current) {
+      if ((effectiveMethod === "cdt" || effectiveMethod === "merge") && !fileMeshRef.current) {
         const fileCached = meshCache.current.get(entry.id)
         if (fileCached) fileMeshRef.current = fileCached
       }
@@ -402,7 +416,6 @@ export default function PolyanyaDemo() {
     }
 
     setLoading(true)
-    // Always need the file mesh first (either to display or to extract boundaries)
     const fileKey = entry.id
     const fileMeshPromise = meshCache.current.has(fileKey)
       ? Promise.resolve(meshCache.current.get(fileKey)!)
@@ -420,8 +433,14 @@ export default function PolyanyaDemo() {
       fileMeshRef.current = fileMesh
       if (effectiveMethod === "file") {
         setMesh(fileMesh); setBuildTimeMs(0)
+      } else if (effectiveMethod === "merge") {
+        const t0 = performance.now()
+        const m = mergeMesh(fileMesh)
+        const bt = performance.now() - t0
+        meshCache.current.set(cacheKey, m)
+        setMesh(m); setBuildTimeMs(bt)
       } else {
-        // CDT rebuild: extract boundaries → computeConvexRegions → build mesh
+        // CDT rebuild
         const t0 = performance.now()
         const { bounds, obstacles: obstacleLoops } = extractObstaclePolylines(fileMesh)
         const result = computeConvexRegions({
@@ -437,7 +456,7 @@ export default function PolyanyaDemo() {
         setMesh(m); setBuildTimeMs(bt)
       }
     }).finally(() => setLoading(false))
-  }, [isEditor ? `editor-${JSON.stringify(obstacles)}-${clearance}-${concavityTolerance}` : `${entry.id}:${effectiveMethod}:${concavityTolerance}`])
+  }, [isEditor ? `editor-${effectiveMethod}-${JSON.stringify(obstacles)}-${clearance}-${concavityTolerance}` : `${entry.id}:${effectiveMethod}:${concavityTolerance}`])
 
   // --- reset on mesh change ---
   useEffect(() => {
@@ -675,7 +694,7 @@ export default function PolyanyaDemo() {
         )}
 
         <label style={labelStyle}>Build method</label>
-        <div style={{ display: "flex", gap: 6 }}>
+        <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
           <button onClick={() => canFile && setBuildMethod("file")} style={{
             ...toggleBtnStyle,
             background: effectiveMethod === "file" ? "#4361ee" : "#1a1a3e",
@@ -692,6 +711,14 @@ export default function PolyanyaDemo() {
           }}>
             find-convex-regions CDT
           </button>
+          <button onClick={() => canMerge && setBuildMethod("merge")} style={{
+            ...toggleBtnStyle,
+            background: effectiveMethod === "merge" ? "#4361ee" : "#1a1a3e",
+            opacity: canMerge ? 1 : 0.35,
+            cursor: canMerge ? "pointer" : "default",
+          }}>
+            Polyanya merge
+          </button>
         </div>
 
         {/* Editor controls */}
@@ -704,9 +731,11 @@ export default function PolyanyaDemo() {
             <label style={labelStyle}>Clearance: {clearance.toFixed(2)}</label>
             <input type="range" min={0} max={2} step={0.05} value={clearance}
               onChange={(e) => setClearance(Number(e.target.value))} style={{ width: "100%" }} />
-            <label style={labelStyle}>Concavity tolerance: {concavityTolerance.toFixed(2)}</label>
-            <input type="range" min={0} max={2} step={0.05} value={concavityTolerance}
-              onChange={(e) => setConcavityTolerance(Number(e.target.value))} style={{ width: "100%" }} />
+            {effectiveMethod === "cdt" && (<>
+              <label style={labelStyle}>Concavity tolerance: {concavityTolerance.toFixed(2)}</label>
+              <input type="range" min={0} max={2} step={0.05} value={concavityTolerance}
+                onChange={(e) => setConcavityTolerance(Number(e.target.value))} style={{ width: "100%" }} />
+            </>)}
             {selectedObs !== null && (
               <div style={{ display: "flex", gap: 8, marginTop: 4 }}>
                 <Btn bg="#e94560" onClick={deleteSelected}>Delete selected</Btn>
@@ -764,11 +793,11 @@ export default function PolyanyaDemo() {
           {displayStats.pathLength > 0 && <Row label="Path length" value={displayStats.pathLength.toFixed(4)} />}
           <Row label="Mesh build" value={fmtTime(buildTimeMs)} />
           {displayStats.searchTimeMs > 0 && <Row label="Search" value={fmtTime(displayStats.searchTimeMs)} />}
-          {!isEditor && effectiveMethod === "cdt" && fileMeshRef.current && mesh && (() => {
+          {(effectiveMethod === "cdt" || effectiveMethod === "merge") && fileMeshRef.current && mesh && (() => {
             const filePoly = fileMeshRef.current!.polygons.length
-            const cdtPoly = mesh.polygons.length
-            const pct = filePoly > 0 ? Math.round((1 - cdtPoly / filePoly) * 100) : 0
-            return <Row label="Polygons" value={`${filePoly.toLocaleString()} → ${cdtPoly.toLocaleString()} (${pct}% fewer)`} />
+            const curPoly = mesh.polygons.length
+            const pct = filePoly > 0 ? Math.round((1 - curPoly / filePoly) * 100) : 0
+            return <Row label="Polygons" value={`${filePoly.toLocaleString()} → ${curPoly.toLocaleString()} (${pct}% fewer)`} />
           })()}
         </div>
 
