@@ -1,0 +1,43 @@
+{
+  "name": "polyanya",
+  "version": "0.0.1",
+  "description": "TypeScript port of Polyanya — compromise-free any-angle pathfinding on navigation meshes",
+  "module": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": "./dist/index.js"
+  },
+  "files": [
+    "dist"
+  ],
+  "type": "module",
+  "scripts": {
+    "start": "cosmos",
+    "build": "tsup --dts --format esm ./lib/index.ts",
+    "build:site": "cosmos-export",
+    "format:check": "biome format .",
+    "format": "biome format --write .",
+    "test": "bun test"
+  },
+  "devDependencies": {
+    "@biomejs/biome": "^1.8.3",
+    "@types/bun": "latest",
+    "@types/react": "^19.2.14",
+    "@types/react-dom": "^19.2.3",
+    "@vitejs/plugin-react": "^5.1.4",
+    "bun-match-svg": "^0.0.15",
+    "graphics-debug": "^0.0.84",
+    "react": "^19.2.4",
+    "react-cosmos": "^7.1.1",
+    "react-cosmos-plugin-vite": "^7.1.1",
+    "react-dom": "^19.2.4",
+    "tsup": "^8.5.1",
+    "vite": "^7.3.1"
+  },
+  "peerDependencies": {
+    "typescript": "^5"
+  },
+  "dependencies": {
+    "@tscircuit/find-convex-regions": "^0.0.9"
+  }
+}
