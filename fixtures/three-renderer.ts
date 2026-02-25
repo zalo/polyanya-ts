@@ -80,7 +80,7 @@ export function createThreeRenderer(): ThreeRenderer {
   container.style.position = "relative"
 
   // --- WebGL renderer ---
-  const glRenderer = new THREE.WebGLRenderer({ antialias: true })
+  const glRenderer = new THREE.WebGLRenderer({ antialias: false })
   glRenderer.setClearColor(0x16213e)
   glRenderer.setPixelRatio(Math.min(window.devicePixelRatio, 1))
   container.appendChild(glRenderer.domElement)
