@@ -52,3 +52,6 @@ export { cdtTriangulate, rectToPolygon } from "./cdt-builder.ts"
 
 // Mesh merger (Polyanya meshmerger algorithm)
 export { mergeMesh } from "./mesh-merger.ts"
+
+// Graph search (dual connectivity A*)
+export { graphSearch, type GraphSearchResult } from "./graph-search.ts"

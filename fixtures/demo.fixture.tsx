@@ -12,6 +12,7 @@ import {
   StepEventType,
   buildMeshFromRegions,
   mergeMesh,
+  graphSearch,
   type Point,
   type SearchNode,
   type StepEvent,
@@ -325,12 +326,34 @@ function buildMeshFromObstacles(obstacles: Obstacle[], clearance: number) {
 // Run search and produce path + stats
 // ---------------------------------------------------------------------------
 
+type SearchAlgorithm = "polyanya" | "graph-astar"
+
 function runSearch(
   mesh: Mesh,
   start: Point,
   goal: Point,
   buildTimeMs: number,
+  algorithm: SearchAlgorithm = "polyanya",
 ): { path: Point[]; stats: Stats } {
+  if (algorithm === "graph-astar") {
+    const t0 = performance.now()
+    const result = graphSearch(mesh, start, goal)
+    const searchTimeMs = performance.now() - t0
+    return {
+      path: result.path,
+      stats: {
+        generated: result.nodesExpanded,
+        pushed: 0,
+        popped: result.nodesExpanded,
+        pruned: 0,
+        openSize: 0,
+        cost: result.cost,
+        pathLength: pathLen(result.path),
+        searchTimeMs,
+        buildTimeMs,
+      },
+    }
+  }
   const s = new SearchInstance(mesh)
   s.setStartGoal(start, goal)
   const t0 = performance.now()
@@ -417,6 +440,10 @@ export default function PolyanyaDemo() {
     null,
   )
 
+  // --- search algorithm ---
+  const [searchAlgorithm, setSearchAlgorithm] =
+    useState<SearchAlgorithm>("polyanya")
+
   // --- search state ---
   const [start, setStart] = useState<Point>(entry.start)
   const [goal, setGoal] = useState<Point>(entry.goal)
@@ -452,6 +479,7 @@ export default function PolyanyaDemo() {
   // Mutable copies of start/goal that update during drag without React re-renders
   const liveStart = useRef(start)
   const liveGoal = useRef(goal)
+  const liveAlgorithm = useRef(searchAlgorithm)
   // Keep in sync when React state changes
   useEffect(() => {
     liveStart.current = start
@@ -459,6 +487,9 @@ export default function PolyanyaDemo() {
   useEffect(() => {
     liveGoal.current = goal
   }, [goal])
+  useEffect(() => {
+    liveAlgorithm.current = searchAlgorithm
+  }, [searchAlgorithm])
 
   // --- mount/dispose Three.js renderer ---
   useEffect(() => {
@@ -548,16 +579,23 @@ export default function PolyanyaDemo() {
     setStart(entry.start)
     setGoal(entry.goal)
     setBuildMethod(selectedId === "editor" ? "cdt" : "file")
+    setSearchAlgorithm("polyanya")
     exitStepMode()
   }, [selectedId])
 
-  // --- compute path whenever mesh/start/goal change (not during drag) ---
+  // --- compute path whenever mesh/start/goal/algorithm change (not during drag) ---
   useEffect(() => {
     if (!mesh) return
-    const { path, stats } = runSearch(mesh, start, goal, buildTimeMs)
+    const { path, stats } = runSearch(
+      mesh,
+      start,
+      goal,
+      buildTimeMs,
+      searchAlgorithm,
+    )
     setLivePath(path)
     setLiveStats(stats)
-  }, [mesh, start, goal, buildTimeMs])
+  }, [mesh, start, goal, buildTimeMs, searchAlgorithm])
 
   useEffect(() => {
     logEndRef.current?.scrollIntoView({ behavior: "smooth" })
@@ -809,7 +847,13 @@ export default function PolyanyaDemo() {
             const curStart = liveStart.current
             const curGoal = liveGoal.current
             if (mesh) {
-              const { path } = runSearch(mesh, curStart, curGoal, buildTimeMs)
+              const { path } = runSearch(
+                mesh,
+                curStart,
+                curGoal,
+                buildTimeMs,
+                liveAlgorithm.current,
+              )
               r.setPath(path)
               r.setMarkers(curStart, curGoal)
               r.render()
@@ -991,6 +1035,30 @@ export default function PolyanyaDemo() {
           )}
         </div>
 
+        <label style={labelStyle}>Search algorithm</label>
+        <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
+          <button
+            onClick={() => setSearchAlgorithm("polyanya")}
+            style={{
+              ...toggleBtnStyle,
+              background:
+                searchAlgorithm === "polyanya" ? "#4361ee" : "#1a1a3e",
+            }}
+          >
+            Polyanya
+          </button>
+          <button
+            onClick={() => setSearchAlgorithm("graph-astar")}
+            style={{
+              ...toggleBtnStyle,
+              background:
+                searchAlgorithm === "graph-astar" ? "#4361ee" : "#1a1a3e",
+            }}
+          >
+            Graph A*
+          </button>
+        </div>
+
         {/* Editor controls */}
         {isEditor && (
           <div style={cardStyle}>
@@ -1074,19 +1142,23 @@ export default function PolyanyaDemo() {
           </div>
         )}
 
-        <label style={labelStyle}>Step delay: {stepSpeed}ms</label>
-        <input
-          type="range"
-          min={10}
-          max={1000}
-          step={10}
-          value={stepSpeed}
-          onChange={(e) => setStepSpeed(Number(e.target.value))}
-          style={{ width: "100%" }}
-        />
+        {searchAlgorithm === "polyanya" && (
+          <>
+            <label style={labelStyle}>Step delay: {stepSpeed}ms</label>
+            <input
+              type="range"
+              min={10}
+              max={1000}
+              step={10}
+              value={stepSpeed}
+              onChange={(e) => setStepSpeed(Number(e.target.value))}
+              style={{ width: "100%" }}
+            />
+          </>
+        )}
 
         <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
-          {mode === "live" && (
+          {mode === "live" && searchAlgorithm === "polyanya" && (
             <Btn bg="#4361ee" onClick={handleStepThrough}>
               Step-through
             </Btn>
@@ -1123,13 +1195,31 @@ export default function PolyanyaDemo() {
 
         <div style={cardStyle}>
           <div style={cardTitle}>Statistics</div>
-          <Row
-            label="Generated"
-            value={displayStats.generated.toLocaleString()}
-          />
-          <Row label="Pushed" value={displayStats.pushed.toLocaleString()} />
-          <Row label="Popped" value={displayStats.popped.toLocaleString()} />
-          <Row label="Pruned" value={displayStats.pruned.toLocaleString()} />
+          {searchAlgorithm === "polyanya" ? (
+            <>
+              <Row
+                label="Generated"
+                value={displayStats.generated.toLocaleString()}
+              />
+              <Row
+                label="Pushed"
+                value={displayStats.pushed.toLocaleString()}
+              />
+              <Row
+                label="Popped"
+                value={displayStats.popped.toLocaleString()}
+              />
+              <Row
+                label="Pruned"
+                value={displayStats.pruned.toLocaleString()}
+              />
+            </>
+          ) : (
+            <Row
+              label="Nodes expanded"
+              value={displayStats.popped.toLocaleString()}
+            />
+          )}
           {inStep && (
             <Row
               label="Open list"
