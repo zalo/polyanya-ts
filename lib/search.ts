@@ -102,6 +102,7 @@ export class SearchInstance {
   goal: Point = { x: 0, y: 0 }
 
   finalNode: SearchNode | null = null
+  private startPolygon = -1
   private endPolygon = -1
   private openList = new MinHeap()
 
@@ -375,6 +376,11 @@ export class SearchInstance {
     this.successorCalls = 0
     this.stepEvents = []
     this.setEndPolygon()
+    this.startPolygon = this.resolvePointLocation(this.start).poly1
+
+    // Skip search if start and goal are on disconnected islands
+    if (!this.mesh.sameIsland(this.startPolygon, this.endPolygon)) return
+
     this.genInitialNodes()
   }
 
@@ -415,6 +421,11 @@ export class SearchInstance {
       events.push({
         type: StepEventType.SEARCH_EXHAUSTED,
         message: "Goal is not on the mesh",
+      })
+    } else if (!this.mesh.sameIsland(this.startPolygon, this.endPolygon)) {
+      events.push({
+        type: StepEventType.SEARCH_EXHAUSTED,
+        message: "Start and goal are on different islands",
       })
     } else if (this.finalNode !== null) {
       events.push({

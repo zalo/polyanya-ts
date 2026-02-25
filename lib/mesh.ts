@@ -21,6 +21,7 @@ export class Mesh {
 
   private slabs: Map<number, number[]> = new Map()
   private sortedSlabKeys: number[] = []
+  private islands: number[] = []
   private minX = 0
   private maxX = 0
   private minY = 0
@@ -239,6 +240,43 @@ export class Mesh {
     }
 
     this.sortedSlabKeys = Array.from(this.slabs.keys()).sort((a, b) => a - b)
+    this.computeIslands()
+  }
+
+  /** BFS flood-fill to assign connected component IDs to each polygon */
+  private computeIslands(): void {
+    const n = this.polygons.length
+    this.islands = new Array(n).fill(-1)
+    let islandId = 0
+
+    for (let start = 0; start < n; start++) {
+      if (this.islands[start] !== -1) continue
+
+      // BFS from this polygon
+      const queue: number[] = [start]
+      this.islands[start] = islandId
+      let head = 0
+
+      while (head < queue.length) {
+        const polyIdx = queue[head++]!
+        const adj = this.polygons[polyIdx]!.polygons
+        for (let j = 0; j < adj.length; j++) {
+          const neighbor = adj[j]!
+          if (neighbor !== -1 && this.islands[neighbor] === -1) {
+            this.islands[neighbor] = islandId
+            queue.push(neighbor)
+          }
+        }
+      }
+
+      islandId++
+    }
+  }
+
+  /** Check if two polygons are on the same connected island */
+  sameIsland(polyA: number, polyB: number): boolean {
+    if (polyA < 0 || polyB < 0) return false
+    return this.islands[polyA] === this.islands[polyB]
   }
 
   /** Test if a polygon contains a point */
@@ -352,15 +390,23 @@ export class Mesh {
       return notOnMesh
     }
 
-    // Find the slab (largest key <= p.x)
-    let slabKey: number | undefined
-    for (let i = this.sortedSlabKeys.length - 1; i >= 0; i--) {
-      if (this.sortedSlabKeys[i]! <= p.x + EPSILON) {
-        slabKey = this.sortedSlabKeys[i]
-        break
+    // Find the slab (largest key <= p.x + EPSILON) via binary search
+    const target = p.x + EPSILON
+    const keys = this.sortedSlabKeys
+    let lo = 0
+    let hi = keys.length - 1
+    let slabIdx = -1
+    while (lo <= hi) {
+      const mid = (lo + hi) >>> 1
+      if (keys[mid]! <= target) {
+        slabIdx = mid
+        lo = mid + 1
+      } else {
+        hi = mid - 1
       }
     }
-    if (slabKey === undefined) return notOnMesh
+    if (slabIdx === -1) return notOnMesh
+    const slabKey = keys[slabIdx]!
 
     const polys = this.slabs.get(slabKey)!
 
