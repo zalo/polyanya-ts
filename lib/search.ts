@@ -378,6 +378,9 @@ export class SearchInstance {
     this.genInitialNodes()
   }
 
+  /** Maximum search time in milliseconds (0 = unlimited) */
+  timeLimitMs = 3000
+
   /**
    * Run the full Polyanya search.
    * Returns true if a path was found, false otherwise.
@@ -611,7 +614,14 @@ export class SearchInstance {
   }
 
   private runSearchLoop(): boolean {
+    const deadline =
+      this.timeLimitMs > 0 ? performance.now() + this.timeLimitMs : Infinity
+
     while (this.openList.size > 0) {
+      if (this.nodesPopped % 1000 === 0 && performance.now() > deadline) {
+        return false // timed out
+      }
+
       const node = this.openList.pop()!
       this.nodesPopped++
 

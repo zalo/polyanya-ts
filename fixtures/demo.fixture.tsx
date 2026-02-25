@@ -18,6 +18,8 @@ import {
 } from "../lib/index"
 import { computeConvexRegions } from "@tscircuit/find-convex-regions"
 
+const BASE = import.meta.env.BASE_URL
+
 // ---------------------------------------------------------------------------
 // Mesh catalog — fetched on-demand from public/meshes/
 // ---------------------------------------------------------------------------
@@ -211,7 +213,7 @@ export default function PolyanyaDemo() {
   const [obstacles, setObstacles] = useState<Obstacle[]>(DEFAULT_OBSTACLES)
   const [nextId, setNextId] = useState(2)
   const [clearance, setClearance] = useState(0.5)
-  const [concavityTolerance, setConcavityTolerance] = useState(0.5)
+  const [concavityTolerance, setConcavityTolerance] = useState(0)
   const [selectedObs, setSelectedObs] = useState<number | null>(null)
   const draggingObs = useRef<{ id: number; offX: number; offY: number } | null>(null)
 
@@ -250,7 +252,7 @@ export default function PolyanyaDemo() {
     if (cached) { setMesh(cached); setBuildTimeMs(0); return }
 
     setLoading(true)
-    fetch(entry.path)
+    fetch(`${BASE}${entry.path.replace(/^\//, "")}`)
       .then((r) => r.text())
       .then((text) => {
         const t0 = performance.now()
@@ -367,9 +369,10 @@ export default function PolyanyaDemo() {
       return
     }
     // Drag obstacle in editor
-    if (draggingObs.current && isEditor) {
+    const drag = draggingObs.current
+    if (drag && isEditor) {
       const p = svgToMesh(e); if (!p) return
-      setObstacles((prev) => prev.map((o) => o.id === draggingObs.current!.id ? { ...o, cx: p.x + draggingObs.current!.offX, cy: p.y + draggingObs.current!.offY } : o))
+      setObstacles((prev) => prev.map((o) => o.id === drag.id ? { ...o, cx: p.x + drag.offX, cy: p.y + drag.offY } : o))
     }
   }, [svgToMesh, isEditor])
 
