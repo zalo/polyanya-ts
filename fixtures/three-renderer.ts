@@ -82,7 +82,7 @@ export function createThreeRenderer(): ThreeRenderer {
   // --- WebGL renderer ---
   const glRenderer = new THREE.WebGLRenderer({ antialias: true })
   glRenderer.setClearColor(0x16213e)
-  glRenderer.setPixelRatio(Math.min(window.devicePixelRatio, 2))
+  glRenderer.setPixelRatio(Math.min(window.devicePixelRatio, 1))
   container.appendChild(glRenderer.domElement)
   glRenderer.domElement.style.position = "absolute"
   glRenderer.domElement.style.inset = "0"
