@@ -1,8 +1,8 @@
 import { expect, test, describe } from "bun:test"
-import { Mesh } from "./lib/mesh.ts"
-import { SearchInstance } from "./lib/search.ts"
-import { distance } from "./lib/index.ts"
-import { StepEventType } from "./lib/types.ts"
+import { Mesh } from "../lib/mesh.ts"
+import { SearchInstance } from "../lib/search.ts"
+import { distance } from "../lib/index.ts"
+import { StepEventType } from "../lib/types.ts"
 
 const SQUARE_MESH = `mesh
 2
@@ -102,7 +102,7 @@ describe("SearchInstance", () => {
 describe("SearchInstance with arena mesh", () => {
   test("finds path on arena mesh", async () => {
     const meshData = await Bun.file(
-      "./meshes/arena.mesh",
+      `${import.meta.dir}/../meshes/arena.mesh`,
     ).text()
     const mesh = Mesh.fromString(meshData)
 

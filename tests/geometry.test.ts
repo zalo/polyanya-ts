@@ -9,8 +9,8 @@ import {
   pointsEqual,
   reflectPoint,
   sub,
-} from "./lib/geometry.ts"
-import { Orientation, ZeroOnePos } from "./lib/types.ts"
+} from "../lib/geometry.ts"
+import { Orientation, ZeroOnePos } from "../lib/types.ts"
 
 describe("Geometry", () => {
   test("distance between points", () => {

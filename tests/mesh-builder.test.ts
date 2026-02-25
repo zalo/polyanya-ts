@@ -1,7 +1,7 @@
 import { expect, test, describe } from "bun:test"
-import { buildMeshFromRegions } from "./lib/mesh-builder.ts"
-import { SearchInstance } from "./lib/search.ts"
-import { distance } from "./lib/index.ts"
+import { buildMeshFromRegions } from "../lib/mesh-builder.ts"
+import { SearchInstance } from "../lib/search.ts"
+import { distance } from "../lib/index.ts"
 
 describe("buildMeshFromRegions", () => {
   test("builds mesh from two triangles", () => {

@@ -1,7 +1,7 @@
 import { expect, test, describe } from "bun:test"
 import { computeConvexRegions } from "@tscircuit/find-convex-regions"
-import { buildMeshFromConvexRegions } from "./lib/from-convex-regions.ts"
-import { SearchInstance } from "./lib/search.ts"
+import { buildMeshFromConvexRegions } from "../lib/from-convex-regions.ts"
+import { SearchInstance } from "../lib/search.ts"
 
 describe("Integration with find-convex-regions", () => {
   test("pathfind around rectangular obstacle", () => {

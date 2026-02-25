@@ -1,6 +1,6 @@
 import { expect, test, describe } from "bun:test"
-import { Mesh } from "./lib/mesh.ts"
-import { PointLocationType } from "./lib/types.ts"
+import { Mesh } from "../lib/mesh.ts"
+import { PointLocationType } from "../lib/types.ts"
 
 const SQUARE_MESH = `mesh
 2
