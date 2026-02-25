@@ -9,7 +9,6 @@ import {
 } from "react"
 import {
   Mesh,
-  PointLocationType,
   SearchInstance,
   StepEventType,
   buildMeshFromRegions,
@@ -100,75 +99,6 @@ function getMeshBounds(mesh: Mesh) {
     minY = Math.min(minY, v.p.y); maxY = Math.max(maxY, v.p.y)
   }
   return { minX, maxX, minY, maxY }
-}
-
-function extractObstaclePolylines(mesh: Mesh): { bounds: ReturnType<typeof getMeshBounds>; obstacles: Point[][] } {
-  // 1. Collect directed boundary edges: V[i]→V[(i+1)%n] where adj polygon is -1
-  const outgoing = new Map<number, number[]>()
-  for (const poly of mesh.polygons) {
-    if (!poly) continue
-    const V = poly.vertices, P = poly.polygons
-    for (let i = 0; i < V.length; i++) {
-      const a = V[i]!, b = V[(i + 1) % V.length]!
-      if (P[(i + 1) % V.length] !== -1) continue
-      if (!outgoing.has(a)) outgoing.set(a, [])
-      outgoing.get(a)!.push(b)
-    }
-  }
-
-  // 2. Trace closed loops
-  const visited = new Set<string>()
-  const loops: Point[][] = []
-  for (const [startV] of outgoing) {
-    for (const firstNext of outgoing.get(startV) ?? []) {
-      const edgeKey = `${startV},${firstNext}`
-      if (visited.has(edgeKey)) continue
-      const loop: number[] = [startV]
-      visited.add(edgeKey)
-      let cur = firstNext
-      while (cur !== startV) {
-        loop.push(cur)
-        const nexts = outgoing.get(cur)
-        if (!nexts) break
-        let found = false
-        for (const n of nexts) {
-          const ek = `${cur},${n}`
-          if (!visited.has(ek)) { visited.add(ek); cur = n; found = true; break }
-        }
-        if (!found) break
-      }
-      if (cur === startV && loop.length >= 3) {
-        loops.push(loop.map((vi) => mesh.vertices[vi]!.p))
-      }
-    }
-  }
-
-  // 3. Compute signed area (shoelace), identify outer boundary (largest loop), keep obstacles
-  const signedArea = (pts: Point[]) => {
-    let a = 0
-    for (let i = 0; i < pts.length; i++) {
-      const p = pts[i]!, q = pts[(i + 1) % pts.length]!
-      a += (p.x * q.y - q.x * p.y)
-    }
-    return a / 2
-  }
-
-  let maxAbsArea = 0, maxIdx = 0
-  const areas = loops.map((l, i) => {
-    const a = signedArea(l)
-    if (Math.abs(a) > maxAbsArea) { maxAbsArea = Math.abs(a); maxIdx = i }
-    return a
-  })
-
-  const obstacles: Point[][] = []
-  for (let i = 0; i < loops.length; i++) {
-    if (i === maxIdx) continue // skip outer boundary
-    const loop = loops[i]!
-    if (areas[i]! < 0) loop.reverse() // ensure CCW
-    obstacles.push(loop)
-  }
-
-  return { bounds: getMeshBounds(mesh), obstacles }
 }
 
 function buildEdgePaths(mesh: Mesh) {
@@ -320,12 +250,11 @@ export default function PolyanyaDemo() {
 
   // --- build method ---
   const [buildMethod, setBuildMethod] = useState<BuildMethod>("cdt")
-  const canCdt = true
   const canFile = !isEditor && !!entry.path
-  const canMerge = true
+  const canMerge = !isEditor
   const effectiveMethod: BuildMethod = isEditor
-    ? (buildMethod === "file" ? "cdt" : buildMethod)
-    : buildMethod
+    ? (buildMethod === "file" || buildMethod === "merge" ? "cdt" : buildMethod)
+    : (buildMethod === "cdt" ? "file" : buildMethod)
 
   // --- mesh state ---
   const [mesh, setMesh] = useState<Mesh | null>(null)
@@ -338,7 +267,6 @@ export default function PolyanyaDemo() {
   const [obstacles, setObstacles] = useState<Obstacle[]>(DEFAULT_OBSTACLES)
   const [nextId, setNextId] = useState(2)
   const [clearance, setClearance] = useState(0.5)
-  const [concavityTolerance, setConcavityTolerance] = useState(0)
   const [selectedObs, setSelectedObs] = useState<number | null>(null)
   const draggingObs = useRef<{ id: number; offX: number; offY: number } | null>(null)
 
@@ -391,16 +319,12 @@ export default function PolyanyaDemo() {
     }
     if (!entry.path) return
 
-    const cacheKey = effectiveMethod === "cdt"
-      ? `${entry.id}:cdt:${concavityTolerance}`
-      : effectiveMethod === "merge"
-        ? `${entry.id}:merge`
-        : entry.id
+    const cacheKey = effectiveMethod === "merge" ? `${entry.id}:merge` : entry.id
     const cached = meshCache.current.get(cacheKey)
     if (cached) {
       setMesh(cached)
       setBuildTimeMs(0)
-      if ((effectiveMethod === "cdt" || effectiveMethod === "merge") && !fileMeshRef.current) {
+      if (effectiveMethod === "merge" && !fileMeshRef.current) {
         const fileCached = meshCache.current.get(entry.id)
         if (fileCached) fileMeshRef.current = fileCached
       }
@@ -424,33 +348,17 @@ export default function PolyanyaDemo() {
 
     fileMeshPromise.then((fileMesh) => {
       fileMeshRef.current = fileMesh
-      if (effectiveMethod === "file") {
-        setMesh(fileMesh); setBuildTimeMs(0)
-      } else if (effectiveMethod === "merge") {
+      if (effectiveMethod === "merge") {
         const t0 = performance.now()
         const m = mergeMesh(fileMesh)
         const bt = performance.now() - t0
         meshCache.current.set(cacheKey, m)
         setMesh(m); setBuildTimeMs(bt)
       } else {
-        // CDT rebuild
-        const t0 = performance.now()
-        const { bounds, obstacles: obstacleLoops } = extractObstaclePolylines(fileMesh)
-        let regions = cdtTriangulate({ bounds, obstacles: obstacleLoops })
-        // Filter out regions outside the original mesh using point location
-        regions = regions.filter((region) => {
-          let cx = 0, cy = 0
-          for (const p of region) { cx += p.x; cy += p.y }
-          cx /= region.length; cy /= region.length
-          return fileMesh.getPointLocation({ x: cx, y: cy }).type !== PointLocationType.NOT_ON_MESH
-        })
-        const m = buildMeshFromRegions({ regions })
-        const bt = performance.now() - t0
-        meshCache.current.set(cacheKey, m)
-        setMesh(m); setBuildTimeMs(bt)
+        setMesh(fileMesh); setBuildTimeMs(0)
       }
     }).finally(() => setLoading(false))
-  }, [isEditor ? `editor-${effectiveMethod}-${JSON.stringify(obstacles)}-${clearance}-${concavityTolerance}` : `${entry.id}:${effectiveMethod}:${concavityTolerance}`])
+  }, [isEditor ? `editor-${effectiveMethod}-${JSON.stringify(obstacles)}-${clearance}` : `${entry.id}:${effectiveMethod}`])
 
   // --- reset on mesh change ---
   useEffect(() => {
@@ -689,30 +597,30 @@ export default function PolyanyaDemo() {
 
         <label style={labelStyle}>Build method</label>
         <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
-          <button onClick={() => canFile && setBuildMethod("file")} style={{
-            ...toggleBtnStyle,
-            background: effectiveMethod === "file" ? "#4361ee" : "#1a1a3e",
-            opacity: canFile ? 1 : 0.35,
-            cursor: canFile ? "pointer" : "default",
-          }}>
-            Load .mesh file
-          </button>
-          <button onClick={() => canCdt && setBuildMethod("cdt")} style={{
-            ...toggleBtnStyle,
-            background: effectiveMethod === "cdt" ? "#4361ee" : "#1a1a3e",
-            opacity: canCdt ? 1 : 0.35,
-            cursor: canCdt ? "pointer" : "default",
-          }}>
-            CDT rebuild
-          </button>
-          <button onClick={() => canMerge && setBuildMethod("merge")} style={{
-            ...toggleBtnStyle,
-            background: effectiveMethod === "merge" ? "#4361ee" : "#1a1a3e",
-            opacity: canMerge ? 1 : 0.35,
-            cursor: canMerge ? "pointer" : "default",
-          }}>
-            Polyanya merge
-          </button>
+          {canFile && (
+            <button onClick={() => setBuildMethod("file")} style={{
+              ...toggleBtnStyle,
+              background: effectiveMethod === "file" ? "#4361ee" : "#1a1a3e",
+            }}>
+              Load .mesh file
+            </button>
+          )}
+          {isEditor && (
+            <button onClick={() => setBuildMethod("cdt")} style={{
+              ...toggleBtnStyle,
+              background: effectiveMethod === "cdt" ? "#4361ee" : "#1a1a3e",
+            }}>
+              CDT
+            </button>
+          )}
+          {canMerge && (
+            <button onClick={() => setBuildMethod("merge")} style={{
+              ...toggleBtnStyle,
+              background: effectiveMethod === "merge" ? "#4361ee" : "#1a1a3e",
+            }}>
+              Polyanya merge
+            </button>
+          )}
         </div>
 
         {/* Editor controls */}
@@ -725,11 +633,6 @@ export default function PolyanyaDemo() {
             <label style={labelStyle}>Clearance: {clearance.toFixed(2)}</label>
             <input type="range" min={0} max={2} step={0.05} value={clearance}
               onChange={(e) => setClearance(Number(e.target.value))} style={{ width: "100%" }} />
-            {effectiveMethod === "cdt" && (<>
-              <label style={labelStyle}>Concavity tolerance: {concavityTolerance.toFixed(2)}</label>
-              <input type="range" min={0} max={2} step={0.05} value={concavityTolerance}
-                onChange={(e) => setConcavityTolerance(Number(e.target.value))} style={{ width: "100%" }} />
-            </>)}
             {selectedObs !== null && (
               <div style={{ display: "flex", gap: 8, marginTop: 4 }}>
                 <Btn bg="#e94560" onClick={deleteSelected}>Delete selected</Btn>
@@ -752,16 +655,6 @@ export default function PolyanyaDemo() {
               </div>
             )}
             <Btn bg="#4a4e69" onClick={() => { setObstacles(DEFAULT_OBSTACLES); setSelectedObs(null); setNextId(2) }}>Reset obstacles</Btn>
-          </div>
-        )}
-
-        {/* Concavity tolerance for file-mesh CDT */}
-        {!isEditor && effectiveMethod === "cdt" && (
-          <div style={cardStyle}>
-            <div style={cardTitle}>CDT Rebuild</div>
-            <label style={labelStyle}>Concavity tolerance: {concavityTolerance.toFixed(2)}</label>
-            <input type="range" min={0} max={2} step={0.05} value={concavityTolerance}
-              onChange={(e) => setConcavityTolerance(Number(e.target.value))} style={{ width: "100%" }} />
           </div>
         )}
 
