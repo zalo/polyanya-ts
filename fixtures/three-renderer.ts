@@ -124,7 +124,6 @@ export function createThreeRenderer(): ThreeRenderer {
   // --- State ---
   let currentMesh: Mesh | null = null
   let currentBounds: Bounds | null = null
-  let sw = 0 // stroke width in world units
   let resolution = new THREE.Vector2(1, 1)
 
   // Track disposable geometries
@@ -314,6 +313,26 @@ export function createThreeRenderer(): ThreeRenderer {
     camera.updateProjectionMatrix()
   }
 
+  /** Recompute all line widths so each line type is a fixed CSS-pixel size. */
+  function updateLineWidths() {
+    const cw = container.clientWidth || 1
+    const visibleW = camera.right - camera.left
+    if (visibleW <= 0) return
+    const px = visibleW / cw // world-units per CSS pixel
+
+    interiorEdgeMat.linewidth = px * 1.0
+    boundaryEdgeMat.linewidth = px * 2.0
+    pathMat.linewidth = px * 3.0
+    openMat.linewidth = px * 2.0
+    pushedMat.linewidth = px * 3.0
+    prunedMat.linewidth = px * 3.0
+    poppedMat.linewidth = px * 3.0
+    obsStrokeMat.linewidth = px * 2.0
+    obsSelectedStrokeMat.linewidth = px * 2.0
+    prunedMat.dashSize = px * 6
+    prunedMat.gapSize = px * 4
+  }
+
   function disposeGroupContent(
     group: THREE.Group,
     geoms: THREE.BufferGeometry[],
@@ -362,7 +381,10 @@ export function createThreeRenderer(): ThreeRenderer {
     glRenderer.setSize(w, h)
     cssRenderer.setSize(w, h)
     updateResolution(w, h)
-    if (currentBounds) updateCamera(currentBounds)
+    if (currentBounds) {
+      updateCamera(currentBounds)
+      updateLineWidths()
+    }
     render()
   })
   ro.observe(container)
@@ -377,23 +399,6 @@ export function createThreeRenderer(): ThreeRenderer {
 
     // Dispose previous static geometry
     disposeGroupContent(staticGroup, staticGeometries, staticLines)
-
-    const meshW = bounds.maxX - bounds.minX
-    const meshH = bounds.maxY - bounds.minY
-    sw = Math.max(meshW, meshH) * 0.003
-
-    // Update line widths
-    interiorEdgeMat.linewidth = sw
-    boundaryEdgeMat.linewidth = sw * 1.5
-    pathMat.linewidth = sw * 3
-    openMat.linewidth = sw * 2
-    pushedMat.linewidth = sw * 3
-    prunedMat.linewidth = sw * 3
-    poppedMat.linewidth = sw * 3
-    obsStrokeMat.linewidth = sw * 2
-    obsSelectedStrokeMat.linewidth = sw * 2
-    prunedMat.dashSize = sw * 3
-    prunedMat.gapSize = sw * 2
 
     // --- Polygon fills (fan triangulation) ---
     const triPositions: number[] = []
@@ -466,8 +471,9 @@ export function createThreeRenderer(): ThreeRenderer {
       staticLines.push(boundary.seg)
     }
 
-    // Update camera
+    // Update camera and line widths (must happen after camera is set)
     updateCamera(bounds)
+    updateLineWidths()
   }
 
   // ---------------------------------------------------------------------------
