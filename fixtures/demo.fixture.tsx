@@ -100,6 +100,75 @@ function getMeshBounds(mesh: Mesh) {
   return { minX, maxX, minY, maxY }
 }
 
+function extractObstaclePolylines(mesh: Mesh): { bounds: ReturnType<typeof getMeshBounds>; obstacles: Point[][] } {
+  // 1. Collect directed boundary edges: V[i]→V[(i+1)%n] where adj polygon is -1
+  const outgoing = new Map<number, number[]>()
+  for (const poly of mesh.polygons) {
+    if (!poly) continue
+    const V = poly.vertices, P = poly.polygons
+    for (let i = 0; i < V.length; i++) {
+      const a = V[i]!, b = V[(i + 1) % V.length]!
+      if (P[(i + 1) % V.length] !== -1) continue
+      if (!outgoing.has(a)) outgoing.set(a, [])
+      outgoing.get(a)!.push(b)
+    }
+  }
+
+  // 2. Trace closed loops
+  const visited = new Set<string>()
+  const loops: Point[][] = []
+  for (const [startV] of outgoing) {
+    for (const firstNext of outgoing.get(startV) ?? []) {
+      const edgeKey = `${startV},${firstNext}`
+      if (visited.has(edgeKey)) continue
+      const loop: number[] = [startV]
+      visited.add(edgeKey)
+      let cur = firstNext
+      while (cur !== startV) {
+        loop.push(cur)
+        const nexts = outgoing.get(cur)
+        if (!nexts) break
+        let found = false
+        for (const n of nexts) {
+          const ek = `${cur},${n}`
+          if (!visited.has(ek)) { visited.add(ek); cur = n; found = true; break }
+        }
+        if (!found) break
+      }
+      if (cur === startV && loop.length >= 3) {
+        loops.push(loop.map((vi) => mesh.vertices[vi]!.p))
+      }
+    }
+  }
+
+  // 3. Compute signed area (shoelace), skip largest (outer boundary), ensure CCW
+  const signedArea = (pts: Point[]) => {
+    let a = 0
+    for (let i = 0; i < pts.length; i++) {
+      const p = pts[i]!, q = pts[(i + 1) % pts.length]!
+      a += (p.x * q.y - q.x * p.y)
+    }
+    return a / 2
+  }
+
+  let maxAbsArea = 0, maxIdx = 0
+  const areas = loops.map((l, i) => {
+    const a = signedArea(l)
+    if (Math.abs(a) > maxAbsArea) { maxAbsArea = Math.abs(a); maxIdx = i }
+    return a
+  })
+
+  const obstacles: Point[][] = []
+  for (let i = 0; i < loops.length; i++) {
+    if (i === maxIdx) continue // skip outer boundary
+    const loop = loops[i]!
+    if (areas[i]! < 0) loop.reverse() // ensure CCW
+    obstacles.push(loop)
+  }
+
+  return { bounds: getMeshBounds(mesh), obstacles }
+}
+
 function buildEdgePaths(mesh: Mesh) {
   const seen = new Set<string>()
   let boundaryD = "", interiorD = ""
@@ -257,15 +326,16 @@ export default function PolyanyaDemo() {
 
   // --- build method ---
   const [buildMethod, setBuildMethod] = useState<BuildMethod>("cdt")
-  const canCdt = isEditor
+  const canCdt = true
   const canFile = !isEditor && !!entry.path
-  const effectiveMethod: BuildMethod = canCdt ? "cdt" : "file"
+  const effectiveMethod: BuildMethod = isEditor ? "cdt" : buildMethod
 
   // --- mesh state ---
   const [mesh, setMesh] = useState<Mesh | null>(null)
   const [loading, setLoading] = useState(false)
   const [buildTimeMs, setBuildTimeMs] = useState(0)
   const meshCache = useRef(new Map<string, Mesh>())
+  const fileMeshRef = useRef<Mesh | null>(null) // original file mesh for stats comparison
 
   // --- editor state ---
   const [obstacles, setObstacles] = useState<Obstacle[]>(DEFAULT_OBSTACLES)
@@ -312,26 +382,62 @@ export default function PolyanyaDemo() {
       const { mesh: m, buildTimeMs: bt } = buildMeshFromObstacles(obstacles, clearance, concavityTolerance)
       setMesh(m)
       setBuildTimeMs(bt)
+      fileMeshRef.current = null
       return
     }
     if (!entry.path) return
 
-    const cached = meshCache.current.get(entry.id)
-    if (cached) { setMesh(cached); setBuildTimeMs(0); return }
+    const cacheKey = effectiveMethod === "cdt" ? `${entry.id}:cdt:${concavityTolerance}` : entry.id
+    const cached = meshCache.current.get(cacheKey)
+    if (cached) {
+      setMesh(cached)
+      setBuildTimeMs(0)
+      // Ensure fileMeshRef is populated for stats comparison
+      if (effectiveMethod === "cdt" && !fileMeshRef.current) {
+        const fileCached = meshCache.current.get(entry.id)
+        if (fileCached) fileMeshRef.current = fileCached
+      }
+      if (effectiveMethod === "file") fileMeshRef.current = cached
+      return
+    }
 
     setLoading(true)
-    fetch(`${BASE}${entry.path.replace(/^\//, "")}`)
-      .then((r) => r.text())
-      .then((text) => {
+    // Always need the file mesh first (either to display or to extract boundaries)
+    const fileKey = entry.id
+    const fileMeshPromise = meshCache.current.has(fileKey)
+      ? Promise.resolve(meshCache.current.get(fileKey)!)
+      : fetch(`${BASE}${entry.path!.replace(/^\//, "")}`)
+          .then((r) => r.text())
+          .then((text) => {
+            const t0 = performance.now()
+            const m = Mesh.fromString(text)
+            const bt = performance.now() - t0
+            meshCache.current.set(fileKey, m)
+            return m
+          })
+
+    fileMeshPromise.then((fileMesh) => {
+      fileMeshRef.current = fileMesh
+      if (effectiveMethod === "file") {
+        setMesh(fileMesh); setBuildTimeMs(0)
+      } else {
+        // CDT rebuild: extract boundaries → computeConvexRegions → build mesh
         const t0 = performance.now()
-        const m = Mesh.fromString(text)
+        const { bounds, obstacles: obstacleLoops } = extractObstaclePolylines(fileMesh)
+        const result = computeConvexRegions({
+          bounds,
+          polygons: obstacleLoops.map((pts) => ({ points: pts })),
+          clearance: 0,
+          concavityTolerance,
+          useConstrainedDelaunay: true,
+        })
+        const m = buildMeshFromRegions({ regions: result.regions })
         const bt = performance.now() - t0
-        meshCache.current.set(entry.id, m)
-        setMesh(m)
-        setBuildTimeMs(bt)
-      })
-      .finally(() => setLoading(false))
-  }, [isEditor ? `editor-${JSON.stringify(obstacles)}-${clearance}-${concavityTolerance}` : entry.id])
+        meshCache.current.set(cacheKey, m)
+        setMesh(m); setBuildTimeMs(bt)
+      }
+    }).finally(() => setLoading(false))
+  }, [isEditor ? `editor-${JSON.stringify(obstacles)}-${clearance}-${concavityTolerance}` : `${entry.id}:${effectiveMethod}:${concavityTolerance}`])
 
   // --- reset on mesh change ---
   useEffect(() => {
@@ -626,6 +732,16 @@ export default function PolyanyaDemo() {
           </div>
         )}
 
+        {/* Concavity tolerance for file-mesh CDT */}
+        {!isEditor && effectiveMethod === "cdt" && (
+          <div style={cardStyle}>
+            <div style={cardTitle}>CDT Rebuild</div>
+            <label style={labelStyle}>Concavity tolerance: {concavityTolerance.toFixed(2)}</label>
+            <input type="range" min={0} max={2} step={0.05} value={concavityTolerance}
+              onChange={(e) => setConcavityTolerance(Number(e.target.value))} style={{ width: "100%" }} />
+          </div>
+        )}
+
         <label style={labelStyle}>Step delay: {stepSpeed}ms</label>
         <input type="range" min={10} max={1000} step={10} value={stepSpeed}
           onChange={(e) => setStepSpeed(Number(e.target.value))} style={{ width: "100%" }} />
@@ -648,6 +764,12 @@ export default function PolyanyaDemo() {
           {displayStats.pathLength > 0 && <Row label="Path length" value={displayStats.pathLength.toFixed(4)} />}
           <Row label="Mesh build" value={fmtTime(buildTimeMs)} />
           {displayStats.searchTimeMs > 0 && <Row label="Search" value={fmtTime(displayStats.searchTimeMs)} />}
+          {!isEditor && effectiveMethod === "cdt" && fileMeshRef.current && mesh && (() => {
+            const filePoly = fileMeshRef.current!.polygons.length
+            const cdtPoly = mesh.polygons.length
+            const pct = filePoly > 0 ? Math.round((1 - cdtPoly / filePoly) * 100) : 0
+            return <Row label="Polygons" value={`${filePoly.toLocaleString()} → ${cdtPoly.toLocaleString()} (${pct}% fewer)`} />
+          })()}
         </div>
 
         <div style={cardStyle}>
