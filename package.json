@@ -24,6 +24,7 @@
     "@types/bun": "latest",
     "@types/react": "^19.2.14",
     "@types/react-dom": "^19.2.3",
+    "@types/three": "^0.183.1",
     "@vitejs/plugin-react": "^5.1.4",
     "bun-match-svg": "^0.0.15",
     "graphics-debug": "^0.0.84",
@@ -31,6 +32,7 @@
     "react-cosmos": "^7.1.1",
     "react-cosmos-plugin-vite": "^7.1.1",
     "react-dom": "^19.2.4",
+    "three": "^0.183.1",
     "tsup": "^8.5.1",
     "vite": "^7.3.1"
   },
