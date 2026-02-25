@@ -22,6 +22,24 @@ import { createThreeRenderer, type ThreeRenderer } from "./three-renderer"
 const BASE = import.meta.env.BASE_URL
 
 // ---------------------------------------------------------------------------
+// Responsive hook
+// ---------------------------------------------------------------------------
+
+function useMediaQuery(query: string) {
+  const [matches, setMatches] = useState(
+    () => typeof window !== "undefined" && window.matchMedia(query).matches,
+  )
+  useEffect(() => {
+    const mql = window.matchMedia(query)
+    const handler = (e: MediaQueryListEvent) => setMatches(e.matches)
+    mql.addEventListener("change", handler)
+    setMatches(mql.matches)
+    return () => mql.removeEventListener("change", handler)
+  }, [query])
+  return matches
+}
+
+// ---------------------------------------------------------------------------
 // Mesh catalog — fetched on-demand from public/meshes/
 // ---------------------------------------------------------------------------
 
@@ -287,16 +305,20 @@ function pathLen(pts: Point[]) {
 
 function buildMeshFromObstacles(obstacles: Obstacle[], clearance: number) {
   const t0 = performance.now()
-  const obstaclePolygons = obstacles.map((o) =>
-    rectToPolygon(o.cx, o.cy, o.w, o.h, clearance),
-  )
-  const regions = cdtTriangulate({
-    bounds: DEFAULT_BOUNDS,
-    obstacles: obstaclePolygons,
-  })
-  const mesh = buildMeshFromRegions({ regions })
-  const buildTimeMs = performance.now() - t0
-  return { mesh, buildTimeMs, regionCount: regions.length }
+  try {
+    const obstaclePolygons = obstacles.map((o) =>
+      rectToPolygon(o.cx, o.cy, o.w, o.h, clearance),
+    )
+    const regions = cdtTriangulate({
+      bounds: DEFAULT_BOUNDS,
+      obstacles: obstaclePolygons,
+    })
+    const mesh = buildMeshFromRegions({ regions })
+    const buildTimeMs = performance.now() - t0
+    return { mesh, buildTimeMs, regionCount: regions.length }
+  } catch {
+    return null
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -362,6 +384,7 @@ const ZERO_STATS: Stats = {
 type BuildMethod = "file" | "cdt" | "merge"
 
 export default function PolyanyaDemo() {
+  const narrow = useMediaQuery("(max-width: 700px)")
   const [selectedId, setSelectedId] = useState("editor")
   const entry = MESH_CATALOG.find((m) => m.id === selectedId)!
   const isEditor = selectedId === "editor"
@@ -452,10 +475,9 @@ export default function PolyanyaDemo() {
   useEffect(() => {
     if (isEditor) {
       const t0 = performance.now()
-      const { mesh: cdtMesh, buildTimeMs: cdtBt } = buildMeshFromObstacles(
-        obstacles,
-        clearance,
-      )
+      const result = buildMeshFromObstacles(obstacles, clearance)
+      if (!result) return // CDT failed — keep previous mesh
+      const { mesh: cdtMesh, buildTimeMs: cdtBt } = result
       if (effectiveMethod === "merge") {
         const m = mergeMesh(cdtMesh)
         const bt = performance.now() - t0
@@ -720,7 +742,7 @@ export default function PolyanyaDemo() {
 
   // --- Unified canvas event handlers ---
   const onCanvasDown = useCallback(
-    (e: React.MouseEvent) => {
+    (e: React.PointerEvent) => {
       const r = rendererRef.current
       if (!r) return
 
@@ -735,6 +757,7 @@ export default function PolyanyaDemo() {
       if (marker) {
         e.preventDefault()
         e.stopPropagation()
+        e.currentTarget.setPointerCapture(e.pointerId)
         if (mode !== "live") exitStepMode()
         draggingRef.current = marker
         return
@@ -746,6 +769,7 @@ export default function PolyanyaDemo() {
         if (obsIdx !== null) {
           e.preventDefault()
           e.stopPropagation()
+          e.currentTarget.setPointerCapture(e.pointerId)
           const obs = obstacles[obsIdx]!
           const p = r.screenToMesh(e.clientX, e.clientY)
           if (p) {
@@ -767,7 +791,7 @@ export default function PolyanyaDemo() {
   )
 
   const onCanvasMove = useCallback(
-    (e: React.MouseEvent) => {
+    (e: React.PointerEvent) => {
       const r = rendererRef.current
       if (!r) return
 
@@ -833,7 +857,7 @@ export default function PolyanyaDemo() {
     [mesh, buildTimeMs, isEditor, obstacles, start, goal, markerR],
   )
 
-  const onCanvasUp = useCallback(() => {
+  const onCanvasUp = useCallback((e?: React.PointerEvent) => {
     const r = rendererRef.current
     // Flush final drag position to React state
     if (draggingRef.current) {
@@ -877,13 +901,17 @@ export default function PolyanyaDemo() {
   // ---------------------------------------------------------------------------
 
   return (
-    <div style={rootStyle}>
+    <div style={{ ...rootStyle, ...(narrow ? { flexDirection: "column" } : {}) }}>
       <div
-        style={canvasWrap}
-        onMouseDown={onCanvasDown}
-        onMouseMove={onCanvasMove}
-        onMouseUp={onCanvasUp}
-        onMouseLeave={onCanvasUp}
+        style={{
+          ...canvasWrap,
+          touchAction: "none",
+          ...(narrow ? { height: "50vh", flex: "none" } : {}),
+        }}
+        onPointerDown={onCanvasDown}
+        onPointerMove={onCanvasMove}
+        onPointerUp={onCanvasUp}
+        onPointerCancel={onCanvasUp}
         onDoubleClick={onCanvasDblClick}
       >
         {loading && <div style={loadingStyle}>Loading mesh...</div>}
@@ -891,7 +919,12 @@ export default function PolyanyaDemo() {
       </div>
 
       {/* ---- Side panel ---- */}
-      <div style={panelStyle}>
+      <div
+        style={{
+          ...panelStyle,
+          ...(narrow ? { width: "auto", maxHeight: "50vh" } : {}),
+        }}
+      >
         <h2 style={{ margin: 0, fontSize: 18, color: "#06d6a0" }}>
           Polyanya Demo
         </h2>

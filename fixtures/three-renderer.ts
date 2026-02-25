@@ -361,7 +361,8 @@ export function createThreeRenderer(): ThreeRenderer {
     if (w === 0 || h === 0) return
     glRenderer.setSize(w, h)
     cssRenderer.setSize(w, h)
-    updateResolution(w, h)
+    const dpr = window.devicePixelRatio || 1
+    updateResolution(w * dpr, h * dpr)
     if (currentBounds) updateCamera(currentBounds)
     render()
   })
