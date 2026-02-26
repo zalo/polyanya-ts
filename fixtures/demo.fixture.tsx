@@ -335,7 +335,7 @@ function runSearch(
   goal: Point,
   buildTimeMs: number,
   algorithm: SearchAlgorithm = "polyanya",
-): { path: Point[]; stats: Stats } {
+): { path: Point[]; stats: Stats; visEdges?: { ax: number; ay: number; bx: number; by: number }[] } {
   if (algorithm === "graph-astar") {
     const t0 = performance.now()
     const result = graphSearch(mesh, start, goal)
@@ -370,6 +370,7 @@ function runSearch(
         searchTimeMs: result.buildTimeMs,
         buildTimeMs,
       },
+      visEdges: result.edges,
     }
   }
   const s = new SearchInstance(mesh)
@@ -467,6 +468,8 @@ export default function PolyanyaDemo() {
   const [goal, setGoal] = useState<Point>(entry.goal)
   const [livePath, setLivePath] = useState<Point[]>([])
   const [liveStats, setLiveStats] = useState<Stats>(ZERO_STATS)
+  const [liveVisEdges, setLiveVisEdges] = useState<{ ax: number; ay: number; bx: number; by: number }[]>([])
+
 
   // --- step-through state ---
   const [mode, setMode] = useState<"live" | "stepping" | "running" | "done">(
@@ -604,7 +607,7 @@ export default function PolyanyaDemo() {
   // --- compute path whenever mesh/start/goal/algorithm change (not during drag) ---
   useEffect(() => {
     if (!mesh) return
-    const { path, stats } = runSearch(
+    const { path, stats, visEdges } = runSearch(
       mesh,
       start,
       goal,
@@ -613,6 +616,7 @@ export default function PolyanyaDemo() {
     )
     setLivePath(path)
     setLiveStats(stats)
+    setLiveVisEdges(visEdges ?? [])
   }, [mesh, start, goal, buildTimeMs, searchAlgorithm])
 
   useEffect(() => {
@@ -647,8 +651,11 @@ export default function PolyanyaDemo() {
     const r = rendererRef.current
     if (!r || !mesh) return
     r.setMesh(mesh, bounds)
+    if (liveVisEdges.length > 0) {
+      r.setVisibilityEdges(liveVisEdges)
+    }
     r.render()
-  }, [mesh, bounds])
+  }, [mesh, bounds, liveVisEdges])
 
   useEffect(() => {
     const r = rendererRef.current

@@ -11,6 +11,7 @@ export interface VisibilityGraphResult {
   nodesExpanded: number
   edgeCount: number
   buildTimeMs: number
+  edges: { ax: number; ay: number; bx: number; by: number }[]
 }
 
 /**
@@ -28,6 +29,7 @@ export function visibilityGraphSearch(
     nodesExpanded: 0,
     edgeCount: 0,
     buildTimeMs: 0,
+    edges: [],
   }
 
   const startLoc = mesh.getPointLocation(start)
@@ -85,22 +87,50 @@ export function visibilityGraphSearch(
   nodePoints[startIdx] = start
   nodePoints[goalIdx] = goal
 
-  // 5. Build adjacency: for each pair, test visibility
+  // 5. Build adjacency using nearest-K candidates to avoid O(n²) on large meshes
   const adj: { to: number; dist: number }[][] = new Array(numNodes)
   for (let i = 0; i < numNodes; i++) adj[i] = []
 
   let edgeCount = 0
+  const visEdges: { ax: number; ay: number; bx: number; by: number }[] = []
+  const addedEdge = new Set<string>()
 
-  // Check visibility between all corners + start + goal
+  const K = 150
+
   for (let i = 0; i < numNodes; i++) {
-    for (let j = i + 1; j < numNodes; j++) {
-      const pi = nodePoints[i]!
+    const pi = nodePoints[i]!
+
+    // Compute distances to all other nodes
+    const candidates: { j: number; dist: number }[] = []
+    for (let j = 0; j < numNodes; j++) {
+      if (j === i) continue
       const pj = nodePoints[j]!
       if (Math.abs(pi.x - pj.x) < EPSILON && Math.abs(pi.y - pj.y) < EPSILON) continue
+      candidates.push({ j, dist: distance(pi, pj) })
+    }
+
+    // Sort by distance and take nearest K
+    candidates.sort((a, b) => a.dist - b.dist)
+    const limit = Math.min(candidates.length, K)
+
+    // Always include start and goal in candidate sets
+    const candidateSet = new Set<number>()
+    for (let c = 0; c < limit; c++) candidateSet.add(candidates[c]!.j)
+    if (i !== startIdx) candidateSet.add(startIdx)
+    if (i !== goalIdx) candidateSet.add(goalIdx)
+
+    for (const j of candidateSet) {
+      // Avoid duplicate edge checks
+      const edgeKey = i < j ? `${i},${j}` : `${j},${i}`
+      if (addedEdge.has(edgeKey)) continue
+      addedEdge.add(edgeKey)
+
+      const pj = nodePoints[j]!
       if (isVisible(pi, pj, segments, bvh, mesh)) {
         const d = distance(pi, pj)
         adj[i]!.push({ to: j, dist: d })
         adj[j]!.push({ to: i, dist: d })
+        visEdges.push({ ax: pi.x, ay: pi.y, bx: pj.x, by: pj.y })
         edgeCount++
       }
     }
@@ -174,7 +204,7 @@ export function visibilityGraphSearch(
         n = cameFrom[n]!
       }
       path.reverse()
-      return { path, cost: cur.g, nodesExpanded, edgeCount, buildTimeMs }
+      return { path, cost: cur.g, nodesExpanded, edgeCount, buildTimeMs, edges: visEdges }
     }
 
     nodesExpanded++
@@ -202,11 +232,13 @@ function isVisible(
   bvh: BVHNode | null,
   mesh: Mesh,
 ): boolean {
-  // Check midpoint is on the mesh (catches paths that cut through obstacles)
-  const mx = (a.x + b.x) * 0.5
-  const my = (a.y + b.y) * 0.5
-  const midLoc = mesh.getPointLocation({ x: mx, y: my })
-  if (midLoc.type === PointLocationType.NOT_ON_MESH) return false
+  // Sample 3 points along the segment to catch paths that graze through obstacles
+  for (const t of [0.25, 0.5, 0.75]) {
+    const sx = a.x + (b.x - a.x) * t
+    const sy = a.y + (b.y - a.y) * t
+    const loc = mesh.getPointLocation({ x: sx, y: sy })
+    if (loc.type === PointLocationType.NOT_ON_MESH) return false
+  }
 
   if (!bvh || segments.length === 0) return true
 

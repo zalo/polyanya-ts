@@ -48,6 +48,7 @@ export interface ThreeRenderer {
     sw: number,
   ): void
   setPath(pathPts: Point[]): void
+  setVisibilityEdges(edges: { ax: number; ay: number; bx: number; by: number }[]): void
   setMarkers(start: Point, goal: Point): void
   setStepOverlays(opts: StepOverlayOpts): void
   clearStepOverlays(): void
@@ -168,7 +169,7 @@ export function createThreeRenderer(): ThreeRenderer {
 
   // --- Materials (all with depthTest: false, depthWrite: false for 2D ortho) ---
   const noDepth = { depthTest: false, depthWrite: false } as const
-  const lineNoDepth = { ...noDepth, alphaToCoverage: true } as const
+  const lineNoDepth = { ...noDepth } as const
 
   const polyFillMat = new THREE.MeshBasicMaterial({
     color: 0x1a1a3e,
@@ -271,6 +272,15 @@ export function createThreeRenderer(): ThreeRenderer {
     ...lineNoDepth,
   })
 
+  const visEdgeMat = new LineMaterial({
+    color: 0x8888cc,
+    transparent: true,
+    opacity: 0.3,
+    worldUnits: true,
+    linewidth: 1,
+    ...lineNoDepth,
+  })
+
   // All LineMaterials that need resolution updates
   const allLineMats = [
     interiorEdgeMat,
@@ -282,6 +292,7 @@ export function createThreeRenderer(): ThreeRenderer {
     poppedMat,
     obsStrokeMat,
     obsSelectedStrokeMat,
+    visEdgeMat,
   ]
 
   // All materials for disposal
@@ -361,6 +372,7 @@ export function createThreeRenderer(): ThreeRenderer {
     poppedMat.linewidth = px * 3.0
     obsStrokeMat.linewidth = px * 3.0
     obsSelectedStrokeMat.linewidth = px * 3.0
+    visEdgeMat.linewidth = px * 1.0
     prunedMat.dashSize = px * 6
     prunedMat.gapSize = px * 4
   }
@@ -508,6 +520,23 @@ export function createThreeRenderer(): ThreeRenderer {
 
     const line = makeLine2(positions, pathMat)
     if (line) pathGroup.add(line)
+  }
+
+  // ---------------------------------------------------------------------------
+  // setVisibilityEdges
+  // ---------------------------------------------------------------------------
+
+  function setVisibilityEdges(
+    edges: { ax: number; ay: number; bx: number; by: number }[],
+  ) {
+    // Visibility edges are added to staticGroup so setMesh clears them automatically
+    if (edges.length === 0) return
+    const positions: number[] = []
+    for (const e of edges) {
+      positions.push(e.ax, e.ay, 0, e.bx, e.by, 0)
+    }
+    const seg = makeSegments(positions, visEdgeMat)
+    if (seg) staticGroup.add(seg)
   }
 
   // ---------------------------------------------------------------------------
@@ -739,6 +768,7 @@ export function createThreeRenderer(): ThreeRenderer {
     setMesh,
     setObstacles,
     setPath,
+    setVisibilityEdges,
     setMarkers,
     setStepOverlays,
     clearStepOverlays,
