@@ -328,7 +328,15 @@ export class SearchInstance {
         break
 
       case PointLocationType.ON_CORNER_VERTEX_AMBIG: {
-        if (pl.poly1 !== -1) {
+        if (this.goalless && pl.vertex1 !== -1) {
+          // Goalless: expand from all adjacent polygons so the full visible
+          // region is covered, not just the single polygon poly1 points to.
+          for (const poly of this.mesh.vertices[pl.vertex1]!.polygons) {
+            const lazy = makeLazy(poly, pl.vertex1, pl.vertex1)
+            pushLazy(lazy)
+            this.nodesGenerated++
+          }
+        } else if (pl.poly1 !== -1) {
           const lazy = makeLazy(pl.poly1, -1, -1)
           pushLazy(lazy)
           this.nodesGenerated++
@@ -336,7 +344,24 @@ export class SearchInstance {
         break
       }
 
-      case PointLocationType.ON_CORNER_VERTEX_UNAMBIG:
+      case PointLocationType.ON_CORNER_VERTEX_UNAMBIG: {
+        if (this.goalless) {
+          // Goalless: expand from all adjacent polygons (same as
+          // ON_NON_CORNER_VERTEX) so corners visible in every angular
+          // sector around this vertex are found.
+          for (const poly of this.mesh.vertices[pl.vertex1]!.polygons) {
+            const lazy = makeLazy(poly, pl.vertex1, pl.vertex1)
+            pushLazy(lazy)
+            this.nodesGenerated++
+          }
+        } else {
+          const lazy = makeLazy(pl.poly1, -1, -1)
+          pushLazy(lazy)
+          this.nodesGenerated++
+        }
+        break
+      }
+
       case PointLocationType.IN_POLYGON:
       case PointLocationType.ON_MESH_BORDER: {
         const lazy = makeLazy(pl.poly1, -1, -1)
