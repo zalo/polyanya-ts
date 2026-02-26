@@ -118,6 +118,8 @@ export class SearchInstance {
   successorCalls = 0
   verbose = false
 
+  private goalless = false
+
   // Step-through support
   private stepEvents: StepEvent[] = []
   private stepMode = false
@@ -178,8 +180,9 @@ export class SearchInstance {
       const nextPolygon = P[succ.polyLeftInd]!
       if (nextPolygon === -1) continue
 
-      // Skip one-way polygons that aren't the end
+      // Skip one-way polygons that aren't the end (but never in goalless mode)
       if (
+        !this.goalless &&
         this.mesh.polygons[nextPolygon]!.isOneWay &&
         nextPolygon !== this.endPolygon
       ) {
@@ -302,7 +305,7 @@ export class SearchInstance {
       for (const n of nodes) {
         const nRoot: Point =
           n.root === -1 ? this.start : this.mesh.vertices[n.root]!.p
-        n.f += getHValue(nRoot, this.goal, n.left, n.right)
+        if (!this.goalless) n.f += getHValue(nRoot, this.goal, n.left, n.right)
         n.parent = lazy
 
         if (this.stepMode) {
@@ -607,7 +610,7 @@ export class SearchInstance {
 
       const nRoot: Point =
         n.root === -1 ? this.start : this.mesh.vertices[n.root]!.p
-      n.f += getHValue(nRoot, this.goal, n.left, n.right)
+      if (!this.goalless) n.f += getHValue(nRoot, this.goal, n.left, n.right)
 
       if (this.stepMode) {
         this.stepEvents.push({
@@ -682,6 +685,72 @@ export class SearchInstance {
 
     out.reverse()
     return out
+  }
+
+  /**
+   * Run a goalless Polyanya expansion from `from`.
+   * Returns a map from vertex index → straight-line distance for every
+   * corner vertex that is directly visible (no detour) from `from`.
+   *
+   * A corner v is directly visible iff g(v) ≈ distance(from, v): the
+   * Polyanya g-value equals the Euclidean distance when no intermediate
+   * turning point is needed.
+   */
+  computeVisibleCornersFromPoint(from: Point): Map<number, number> {
+    const savedStart = this.start
+    const savedGoal = this.goal
+    const savedEndPolygon = this.endPolygon
+
+    this.start = from
+    this.goal = from  // h ≈ 0 → pure Dijkstra ordering
+    this.endPolygon = -2  // never matches a polygon; prevents early termination
+    this.goalless = true
+
+    this.searchId++
+    this.openList.clear()
+    this.finalNode = null
+    this.nodesGenerated = 0
+    this.nodesPushed = 0
+    this.nodesPopped = 0
+    this.nodesPrunedPostPop = 0
+    this.successorCalls = 0
+    this.stepEvents = []
+
+    this.startPolygon = this.resolvePointLocation(from).poly1
+    if (this.startPolygon >= 0) {
+      this.genInitialNodes()
+      while (this.openList.size > 0) {
+        const node = this.openList.pop()!
+        this.nodesPopped++
+        if (
+          node.root !== -1 &&
+          this.rootSearchIds[node.root] === this.searchId &&
+          this.rootGValues[node.root]! + EPSILON < node.g
+        ) {
+          this.nodesPrunedPostPop++
+          continue
+        }
+        this.expandAndPush(node)
+      }
+    }
+
+    this.start = savedStart
+    this.goal = savedGoal
+    this.endPolygon = savedEndPolygon
+    this.goalless = false
+
+    // Collect corners where g ≈ Euclidean distance → directly visible
+    const result = new Map<number, number>()
+    for (let i = 0; i < this.mesh.vertices.length; i++) {
+      if (this.rootSearchIds[i] !== this.searchId) continue
+      const v = this.mesh.vertices[i]!
+      if (!v.isCorner) continue
+      const g = this.rootGValues[i]!
+      if (g <= distance(from, v.p) + EPSILON * 100) {
+        result.set(i, g)
+      }
+    }
+    return result
   }
 
   /**
