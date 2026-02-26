@@ -22,7 +22,7 @@ export interface Vertex {
 export interface Polygon {
   /** Vertex indices (CCW order) */
   vertices: number[]
-  /** Adjacent polygon indices. polygons[i] is adjacent to edge (vertices[i], vertices[i+1 mod N]). -1 = obstacle. */
+  /** Adjacent polygon indices. polygons[i] is adjacent to edge (vertices[(i-1+N) mod N], vertices[i]). -1 = obstacle. */
   polygons: number[]
   /** True if only one traversable neighbor */
   isOneWay: boolean

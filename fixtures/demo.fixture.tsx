@@ -13,6 +13,7 @@ import {
   buildMeshFromRegions,
   mergeMesh,
   graphSearch,
+  visibilityGraphSearch,
   type Point,
   type SearchNode,
   type StepEvent,
@@ -326,7 +327,7 @@ function buildMeshFromObstacles(obstacles: Obstacle[], clearance: number) {
 // Run search and produce path + stats
 // ---------------------------------------------------------------------------
 
-type SearchAlgorithm = "polyanya" | "graph-astar"
+type SearchAlgorithm = "polyanya" | "graph-astar" | "visibility-graph"
 
 function runSearch(
   mesh: Mesh,
@@ -350,6 +351,23 @@ function runSearch(
         cost: result.cost,
         pathLength: pathLen(result.path),
         searchTimeMs,
+        buildTimeMs,
+      },
+    }
+  }
+  if (algorithm === "visibility-graph") {
+    const result = visibilityGraphSearch(mesh, start, goal)
+    return {
+      path: result.path,
+      stats: {
+        generated: result.edgeCount,
+        pushed: 0,
+        popped: result.nodesExpanded,
+        pruned: 0,
+        openSize: 0,
+        cost: result.cost,
+        pathLength: pathLen(result.path),
+        searchTimeMs: result.buildTimeMs,
         buildTimeMs,
       },
     }
@@ -1070,6 +1088,16 @@ export default function PolyanyaDemo() {
             }}
           >
             Graph A*
+          </button>
+          <button
+            onClick={() => setSearchAlgorithm("visibility-graph")}
+            style={{
+              ...toggleBtnStyle,
+              background:
+                searchAlgorithm === "visibility-graph" ? "#4361ee" : "#1a1a3e",
+            }}
+          >
+            Visibility Graph
           </button>
         </div>
 

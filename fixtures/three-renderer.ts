@@ -69,6 +69,47 @@ export interface ThreeRenderer {
 }
 
 // ---------------------------------------------------------------------------
+// Helpers
+// ---------------------------------------------------------------------------
+
+/** Recursively dispose all geometries in a group, then remove all children. */
+function disposeGroup(group: THREE.Group): void {
+  for (const child of group.children) {
+    if (child instanceof THREE.Mesh || child instanceof LineSegments2 || child instanceof Line2) {
+      child.geometry.dispose()
+    }
+    if (child instanceof CSS2DObject) {
+      child.element.remove()
+    }
+  }
+  group.clear()
+}
+
+function makeSegments(
+  positions: number[],
+  material: LineMaterial,
+): LineSegments2 | null {
+  if (positions.length === 0) return null
+  const geom = new LineSegmentsGeometry()
+  geom.setPositions(positions)
+  const seg = new LineSegments2(geom, material)
+  seg.computeLineDistances()
+  return seg
+}
+
+function makeLine2(
+  positions: number[],
+  material: LineMaterial,
+): Line2 | null {
+  if (positions.length < 6) return null
+  const geom = new LineGeometry()
+  geom.setPositions(positions)
+  const line = new Line2(geom, material)
+  line.computeLineDistances()
+  return line
+}
+
+// ---------------------------------------------------------------------------
 // Factory
 // ---------------------------------------------------------------------------
 
@@ -119,33 +160,21 @@ export function createThreeRenderer(): ThreeRenderer {
   pathGroup.position.z = 0.3
   const markerGroup = new THREE.Group()
   markerGroup.position.z = 0.4
-  scene.add(
-    staticGroup,
-    obstacleGroup,
-    stepOverlayGroup,
-    pathGroup,
-    markerGroup,
-  )
+  scene.add(staticGroup, obstacleGroup, stepOverlayGroup, pathGroup, markerGroup)
 
   // --- State ---
-  let currentMesh: Mesh | null = null
   let currentBounds: Bounds | null = null
-  let resolution = new THREE.Vector2(1, 1)
+  const resolution = new THREE.Vector2(1, 1)
 
-  // Track disposable geometries
-  let staticGeometries: THREE.BufferGeometry[] = []
-  let staticLines: (LineSegments2 | Line2)[] = []
-  let obstacleGeometries: THREE.BufferGeometry[] = []
-  let obstacleLines: (LineSegments2 | Line2)[] = []
-  let stepGeometries: THREE.BufferGeometry[] = []
-  let stepLines: (LineSegments2 | Line2)[] = []
+  // --- Materials (all with depthTest: false, depthWrite: false for 2D ortho) ---
+  const noDepth = { depthTest: false, depthWrite: false } as const
+  const lineNoDepth = { ...noDepth, alphaToCoverage: true } as const
 
-  // Materials — reused across rebuilds
   const polyFillMat = new THREE.MeshBasicMaterial({
     color: 0x1a1a3e,
     transparent: true,
     opacity: 0.6,
-    depthTest: false,
+    ...noDepth,
   })
   const interiorEdgeMat = new LineMaterial({
     color: 0x4a4e69,
@@ -153,6 +182,7 @@ export function createThreeRenderer(): ThreeRenderer {
     opacity: 0.4,
     worldUnits: true,
     linewidth: 1,
+    ...lineNoDepth,
   })
   const boundaryEdgeMat = new LineMaterial({
     color: 0xe94560,
@@ -160,43 +190,24 @@ export function createThreeRenderer(): ThreeRenderer {
     opacity: 0.8,
     worldUnits: true,
     linewidth: 1,
+    ...lineNoDepth,
   })
   const pathMat = new LineMaterial({
     color: 0x06d6a0,
     worldUnits: true,
     linewidth: 1,
+    ...lineNoDepth,
   })
 
-  // Path line (reused)
-  let pathLine: Line2 | null = null
-  let pathGeom: LineGeometry | null = null
+  const markerBgMat = new THREE.MeshBasicMaterial({ color: 0xffffff, ...noDepth })
+  const startFgMat = new THREE.MeshBasicMaterial({ color: 0x06d6a0, ...noDepth })
+  const goalFgMat = new THREE.MeshBasicMaterial({ color: 0xf72585, ...noDepth })
 
-  // Marker objects
-  let startBgMesh: THREE.Mesh | null = null
-  let startFgMesh: THREE.Mesh | null = null
-  let goalBgMesh: THREE.Mesh | null = null
-  let goalFgMesh: THREE.Mesh | null = null
-  let startLabelObj: CSS2DObject | null = null
-  let goalLabelObj: CSS2DObject | null = null
-  const markerBgMat = new THREE.MeshBasicMaterial({
-    color: 0xffffff,
-    depthTest: false,
-  })
-  const startFgMat = new THREE.MeshBasicMaterial({
-    color: 0x06d6a0,
-    depthTest: false,
-  })
-  const goalFgMat = new THREE.MeshBasicMaterial({
-    color: 0xf72585,
-    depthTest: false,
-  })
-
-  // Step overlay materials
   const expandedPolyMat = new THREE.MeshBasicMaterial({
     color: 0x4361ee,
     transparent: true,
     opacity: 0.5,
-    depthTest: false,
+    ...noDepth,
   })
   const openMat = new LineMaterial({
     color: 0xf8961e,
@@ -204,6 +215,7 @@ export function createThreeRenderer(): ThreeRenderer {
     opacity: 0.6,
     worldUnits: true,
     linewidth: 1,
+    ...lineNoDepth,
   })
   const pushedMat = new LineMaterial({
     color: 0x2ec4b6,
@@ -211,6 +223,7 @@ export function createThreeRenderer(): ThreeRenderer {
     opacity: 0.9,
     worldUnits: true,
     linewidth: 1,
+    ...lineNoDepth,
   })
   const prunedMat = new LineMaterial({
     color: 0x888888,
@@ -222,6 +235,7 @@ export function createThreeRenderer(): ThreeRenderer {
     dashScale: 1,
     dashSize: 1,
     gapSize: 0.67,
+    ...lineNoDepth,
   })
   const poppedMat = new LineMaterial({
     color: 0xf72585,
@@ -229,31 +243,58 @@ export function createThreeRenderer(): ThreeRenderer {
     opacity: 0.9,
     worldUnits: true,
     linewidth: 1,
+    ...lineNoDepth,
   })
 
-  // Obstacle materials
   const obsFillMat = new THREE.MeshBasicMaterial({
     color: 0xe94560,
     transparent: true,
     opacity: 0.4,
-    depthTest: false,
+    ...noDepth,
   })
   const obsSelectedFillMat = new THREE.MeshBasicMaterial({
     color: 0xf72585,
     transparent: true,
     opacity: 0.4,
-    depthTest: false,
+    ...noDepth,
   })
   const obsStrokeMat = new LineMaterial({
     color: 0xe94560,
     worldUnits: true,
     linewidth: 1,
+    ...lineNoDepth,
   })
   const obsSelectedStrokeMat = new LineMaterial({
     color: 0xf72585,
     worldUnits: true,
     linewidth: 1,
+    ...lineNoDepth,
   })
+
+  // All LineMaterials that need resolution updates
+  const allLineMats = [
+    interiorEdgeMat,
+    boundaryEdgeMat,
+    pathMat,
+    openMat,
+    pushedMat,
+    prunedMat,
+    poppedMat,
+    obsStrokeMat,
+    obsSelectedStrokeMat,
+  ]
+
+  // All materials for disposal
+  const allMaterials: THREE.Material[] = [
+    polyFillMat,
+    ...allLineMats,
+    markerBgMat,
+    startFgMat,
+    goalFgMat,
+    expandedPolyMat,
+    obsFillMat,
+    obsSelectedFillMat,
+  ]
 
   // ---------------------------------------------------------------------------
   // Helpers
@@ -261,19 +302,7 @@ export function createThreeRenderer(): ThreeRenderer {
 
   function updateResolution(w: number, h: number) {
     resolution.set(w, h)
-    for (const mat of [
-      interiorEdgeMat,
-      boundaryEdgeMat,
-      pathMat,
-      openMat,
-      pushedMat,
-      prunedMat,
-      poppedMat,
-      obsStrokeMat,
-      obsSelectedStrokeMat,
-    ]) {
-      mat.resolution.set(w, h)
-    }
+    for (const mat of allLineMats) mat.resolution.set(w, h)
   }
 
   function updateCamera(bounds: Bounds) {
@@ -295,7 +324,6 @@ export function createThreeRenderer(): ThreeRenderer {
 
     let left: number, right: number, bottom: number, top: number
     if (viewAspect > meshAspect) {
-      // wider viewport — letterbox horizontally
       const visibleW = paddedH * viewAspect
       const cx = (paddedMinX + paddedMaxX) / 2
       left = cx - visibleW / 2
@@ -303,7 +331,6 @@ export function createThreeRenderer(): ThreeRenderer {
       bottom = paddedMinY
       top = paddedMaxY
     } else {
-      // taller viewport — letterbox vertically
       const visibleH = paddedW / viewAspect
       const cy = (paddedMinY + paddedMaxY) / 2
       left = paddedMinX
@@ -319,12 +346,11 @@ export function createThreeRenderer(): ThreeRenderer {
     camera.updateProjectionMatrix()
   }
 
-  /** Recompute all line widths so each line type is a fixed CSS-pixel size. */
   function updateLineWidths() {
     const cw = container.clientWidth || 1
     const visibleW = camera.right - camera.left
     if (visibleW <= 0) return
-    const px = visibleW / cw // world-units per CSS pixel
+    const px = visibleW / cw
 
     interiorEdgeMat.linewidth = px * 1.5
     boundaryEdgeMat.linewidth = px * 3.0
@@ -337,43 +363,6 @@ export function createThreeRenderer(): ThreeRenderer {
     obsSelectedStrokeMat.linewidth = px * 3.0
     prunedMat.dashSize = px * 6
     prunedMat.gapSize = px * 4
-  }
-
-  function disposeGroupContent(
-    group: THREE.Group,
-    geoms: THREE.BufferGeometry[],
-    lines: (LineSegments2 | Line2)[],
-  ) {
-    for (const g of geoms) g.dispose()
-    geoms.length = 0
-    lines.length = 0
-    while (group.children.length > 0) {
-      group.remove(group.children[0]!)
-    }
-  }
-
-  function makeSegments(
-    positions: number[],
-    material: LineMaterial,
-  ): { seg: LineSegments2; geom: LineSegmentsGeometry } | null {
-    if (positions.length === 0) return null
-    const geom = new LineSegmentsGeometry()
-    geom.setPositions(positions)
-    const seg = new LineSegments2(geom, material)
-    seg.computeLineDistances()
-    return { seg, geom }
-  }
-
-  function makeLine2(
-    positions: number[],
-    material: LineMaterial,
-  ): { line: Line2; geom: LineGeometry } | null {
-    if (positions.length < 6) return null
-    const geom = new LineGeometry()
-    geom.setPositions(positions)
-    const line = new Line2(geom, material)
-    line.computeLineDistances()
-    return { line, geom }
   }
 
   // ---------------------------------------------------------------------------
@@ -400,11 +389,8 @@ export function createThreeRenderer(): ThreeRenderer {
   // ---------------------------------------------------------------------------
 
   function setMesh(mesh: Mesh, bounds: Bounds) {
-    currentMesh = mesh
     currentBounds = bounds
-
-    // Dispose previous static geometry
-    disposeGroupContent(staticGroup, staticGeometries, staticLines)
+    disposeGroup(staticGroup)
 
     // --- Polygon fills (fan triangulation) ---
     const triPositions: number[] = []
@@ -419,27 +405,16 @@ export function createThreeRenderer(): ThreeRenderer {
         const v2 = mesh.vertices[V[i + 1]!]
         if (!v1 || !v2) continue
         triPositions.push(
-          v0.p.x,
-          v0.p.y,
-          0,
-          v1.p.x,
-          v1.p.y,
-          0,
-          v2.p.x,
-          v2.p.y,
-          0,
+          v0.p.x, v0.p.y, 0,
+          v1.p.x, v1.p.y, 0,
+          v2.p.x, v2.p.y, 0,
         )
       }
     }
     if (triPositions.length > 0) {
       const geom = new THREE.BufferGeometry()
-      geom.setAttribute(
-        "position",
-        new THREE.Float32BufferAttribute(triPositions, 3),
-      )
-      const polyMesh = new THREE.Mesh(geom, polyFillMat)
-      staticGroup.add(polyMesh)
-      staticGeometries.push(geom)
+      geom.setAttribute("position", new THREE.Float32BufferAttribute(triPositions, 3))
+      staticGroup.add(new THREE.Mesh(geom, polyFillMat))
     }
 
     // --- Edges ---
@@ -448,36 +423,28 @@ export function createThreeRenderer(): ThreeRenderer {
     const boundaryPos: number[] = []
     for (const poly of mesh.polygons) {
       if (!poly) continue
-      const V = poly.vertices,
-        P = poly.polygons
+      const V = poly.vertices
+      const P = poly.polygons
       for (let i = 0; i < V.length; i++) {
-        const a = V[i]!,
-          b = V[(i + 1) % V.length]!
+        const a = V[i]!
+        const b = V[(i + 1) % V.length]!
         const key = a < b ? `${a},${b}` : `${b},${a}`
         if (seen.has(key)) continue
         seen.add(key)
-        const va = mesh.vertices[a],
-          vb = mesh.vertices[b]
+        const va = mesh.vertices[a]
+        const vb = mesh.vertices[b]
         if (!va || !vb) continue
+        // Edge (V[i], V[i+1]): adjacent polygon is P[(i+1) % N]
         const arr = P[(i + 1) % V.length] === -1 ? boundaryPos : interiorPos
         arr.push(va.p.x, va.p.y, 0, vb.p.x, vb.p.y, 0)
       }
     }
 
     const interior = makeSegments(interiorPos, interiorEdgeMat)
-    if (interior) {
-      staticGroup.add(interior.seg)
-      staticGeometries.push(interior.geom)
-      staticLines.push(interior.seg)
-    }
+    if (interior) staticGroup.add(interior)
     const boundary = makeSegments(boundaryPos, boundaryEdgeMat)
-    if (boundary) {
-      staticGroup.add(boundary.seg)
-      staticGeometries.push(boundary.geom)
-      staticLines.push(boundary.seg)
-    }
+    if (boundary) staticGroup.add(boundary)
 
-    // Update camera and line widths (must happen after camera is set)
     updateCamera(bounds)
     updateLineWidths()
   }
@@ -491,18 +458,17 @@ export function createThreeRenderer(): ThreeRenderer {
     selectedId: number | null,
     _sw: number,
   ) {
-    disposeGroupContent(obstacleGroup, obstacleGeometries, obstacleLines)
-
+    disposeGroup(obstacleGroup)
     if (obstacles.length === 0) return
 
     for (const o of obstacles) {
       const isSelected = o.id === selectedId
-      const x0 = o.cx - o.w / 2,
-        x1 = o.cx + o.w / 2
-      const y0 = o.cy - o.h / 2,
-        y1 = o.cy + o.h / 2
+      const x0 = o.cx - o.w / 2
+      const x1 = o.cx + o.w / 2
+      const y0 = o.cy - o.h / 2
+      const y1 = o.cy + o.h / 2
 
-      // Fill quad (two triangles)
+      // Fill quad
       const fillGeom = new THREE.BufferGeometry()
       fillGeom.setAttribute(
         "position",
@@ -511,48 +477,21 @@ export function createThreeRenderer(): ThreeRenderer {
           3,
         ),
       )
-      const fillMesh = new THREE.Mesh(
-        fillGeom,
-        isSelected ? obsSelectedFillMat : obsFillMat,
+      obstacleGroup.add(
+        new THREE.Mesh(fillGeom, isSelected ? obsSelectedFillMat : obsFillMat),
       )
-      obstacleGroup.add(fillMesh)
-      obstacleGeometries.push(fillGeom)
 
       // Outline
       const outline = makeSegments(
         [
-          x0,
-          y0,
-          0,
-          x1,
-          y0,
-          0,
-          x1,
-          y0,
-          0,
-          x1,
-          y1,
-          0,
-          x1,
-          y1,
-          0,
-          x0,
-          y1,
-          0,
-          x0,
-          y1,
-          0,
-          x0,
-          y0,
-          0,
+          x0, y0, 0, x1, y0, 0,
+          x1, y0, 0, x1, y1, 0,
+          x1, y1, 0, x0, y1, 0,
+          x0, y1, 0, x0, y0, 0,
         ],
         isSelected ? obsSelectedStrokeMat : obsStrokeMat,
       )
-      if (outline) {
-        obstacleGroup.add(outline.seg)
-        obstacleGeometries.push(outline.geom)
-        obstacleLines.push(outline.seg)
-      }
+      if (outline) obstacleGroup.add(outline)
     }
   }
 
@@ -561,27 +500,14 @@ export function createThreeRenderer(): ThreeRenderer {
   // ---------------------------------------------------------------------------
 
   function setPath(pathPts: Point[]) {
-    // Dispose old path
-    if (pathGeom) {
-      pathGeom.dispose()
-      pathGeom = null
-    }
-    if (pathLine) {
-      pathGroup.remove(pathLine)
-      pathLine = null
-    }
-
+    disposeGroup(pathGroup)
     if (pathPts.length < 2) return
 
     const positions: number[] = []
     for (const p of pathPts) positions.push(p.x, p.y, 0)
 
-    const result = makeLine2(positions, pathMat)
-    if (result) {
-      pathLine = result.line
-      pathGeom = result.geom
-      pathGroup.add(pathLine)
-    }
+    const line = makeLine2(positions, pathMat)
+    if (line) pathGroup.add(line)
   }
 
   // ---------------------------------------------------------------------------
@@ -589,22 +515,9 @@ export function createThreeRenderer(): ThreeRenderer {
   // ---------------------------------------------------------------------------
 
   function setMarkers(start: Point, goal: Point) {
-    // Clear old markers
-    while (markerGroup.children.length > 0) {
-      const child = markerGroup.children[0]!
-      if (child instanceof CSS2DObject) {
-        child.element.remove()
-      }
-      markerGroup.remove(child)
-    }
-    startBgMesh = null
-    startFgMesh = null
-    goalBgMesh = null
-    goalFgMesh = null
-    startLabelObj = null
-    goalLabelObj = null
-
+    disposeGroup(markerGroup)
     if (!currentBounds) return
+
     const meshExtent = Math.max(
       currentBounds.maxX - currentBounds.minX,
       currentBounds.maxY - currentBounds.minY,
@@ -615,22 +528,22 @@ export function createThreeRenderer(): ThreeRenderer {
     const fgGeom = new THREE.CircleGeometry(markerR * 0.8, 32)
 
     // Start marker
-    startBgMesh = new THREE.Mesh(bgGeom, markerBgMat)
-    startBgMesh.position.set(start.x, start.y, 0)
-    markerGroup.add(startBgMesh)
+    const sBg = new THREE.Mesh(bgGeom, markerBgMat)
+    sBg.position.set(start.x, start.y, 0)
+    markerGroup.add(sBg)
 
-    startFgMesh = new THREE.Mesh(fgGeom, startFgMat)
-    startFgMesh.position.set(start.x, start.y, 0.01)
-    markerGroup.add(startFgMesh)
+    const sFg = new THREE.Mesh(fgGeom.clone(), startFgMat)
+    sFg.position.set(start.x, start.y, 0.01)
+    markerGroup.add(sFg)
 
     // Goal marker
-    goalBgMesh = new THREE.Mesh(bgGeom, markerBgMat)
-    goalBgMesh.position.set(goal.x, goal.y, 0)
-    markerGroup.add(goalBgMesh)
+    const gBg = new THREE.Mesh(bgGeom.clone(), markerBgMat)
+    gBg.position.set(goal.x, goal.y, 0)
+    markerGroup.add(gBg)
 
-    goalFgMesh = new THREE.Mesh(fgGeom, goalFgMat)
-    goalFgMesh.position.set(goal.x, goal.y, 0.01)
-    markerGroup.add(goalFgMesh)
+    const gFg = new THREE.Mesh(fgGeom.clone(), goalFgMat)
+    gFg.position.set(goal.x, goal.y, 0.01)
+    markerGroup.add(gFg)
 
     // Labels
     const makeLabel = (text: string, color: string): CSS2DObject => {
@@ -646,13 +559,13 @@ export function createThreeRenderer(): ThreeRenderer {
       return new CSS2DObject(div)
     }
 
-    startLabelObj = makeLabel("S", "#06d6a0")
-    startLabelObj.position.set(start.x, start.y + markerR * 1.8, 0.02)
-    markerGroup.add(startLabelObj)
+    const sLabel = makeLabel("S", "#06d6a0")
+    sLabel.position.set(start.x, start.y + markerR * 1.8, 0.02)
+    markerGroup.add(sLabel)
 
-    goalLabelObj = makeLabel("G", "#f72585")
-    goalLabelObj.position.set(goal.x, goal.y + markerR * 1.8, 0.02)
-    markerGroup.add(goalLabelObj)
+    const gLabel = makeLabel("G", "#f72585")
+    gLabel.position.set(goal.x, goal.y + markerR * 1.8, 0.02)
+    markerGroup.add(gLabel)
   }
 
   // ---------------------------------------------------------------------------
@@ -660,7 +573,7 @@ export function createThreeRenderer(): ThreeRenderer {
   // ---------------------------------------------------------------------------
 
   function clearStepOverlays() {
-    disposeGroupContent(stepOverlayGroup, stepGeometries, stepLines)
+    disposeGroup(stepOverlayGroup)
   }
 
   function setStepOverlays(opts: StepOverlayOpts) {
@@ -680,26 +593,15 @@ export function createThreeRenderer(): ThreeRenderer {
             const v2 = mesh.vertices[V[i + 1]!]
             if (!v1 || !v2) continue
             positions.push(
-              v0.p.x,
-              v0.p.y,
-              0,
-              v1.p.x,
-              v1.p.y,
-              0,
-              v2.p.x,
-              v2.p.y,
-              0,
+              v0.p.x, v0.p.y, 0,
+              v1.p.x, v1.p.y, 0,
+              v2.p.x, v2.p.y, 0,
             )
           }
           if (positions.length > 0) {
             const geom = new THREE.BufferGeometry()
-            geom.setAttribute(
-              "position",
-              new THREE.Float32BufferAttribute(positions, 3),
-            )
-            const m = new THREE.Mesh(geom, expandedPolyMat)
-            stepOverlayGroup.add(m)
-            stepGeometries.push(geom)
+            geom.setAttribute("position", new THREE.Float32BufferAttribute(positions, 3))
+            stepOverlayGroup.add(new THREE.Mesh(geom, expandedPolyMat))
           }
         }
       }
@@ -711,12 +613,8 @@ export function createThreeRenderer(): ThreeRenderer {
       for (const n of opts.openNodes) {
         pos.push(n.left.x, n.left.y, 0, n.right.x, n.right.y, 0)
       }
-      const result = makeSegments(pos, openMat)
-      if (result) {
-        stepOverlayGroup.add(result.seg)
-        stepGeometries.push(result.geom)
-        stepLines.push(result.seg)
-      }
+      const seg = makeSegments(pos, openMat)
+      if (seg) stepOverlayGroup.add(seg)
     }
 
     // Pushed intervals
@@ -725,40 +623,28 @@ export function createThreeRenderer(): ThreeRenderer {
       for (const n of opts.pushedNodes) {
         pos.push(n.left.x, n.left.y, 0, n.right.x, n.right.y, 0)
       }
-      const result = makeSegments(pos, pushedMat)
-      if (result) {
-        stepOverlayGroup.add(result.seg)
-        stepGeometries.push(result.geom)
-        stepLines.push(result.seg)
-      }
+      const seg = makeSegments(pos, pushedMat)
+      if (seg) stepOverlayGroup.add(seg)
     }
 
     // Pruned interval (dashed)
     if (opts.prunedNode) {
       const n = opts.prunedNode
-      const result = makeSegments(
+      const seg = makeSegments(
         [n.left.x, n.left.y, 0, n.right.x, n.right.y, 0],
         prunedMat,
       )
-      if (result) {
-        stepOverlayGroup.add(result.seg)
-        stepGeometries.push(result.geom)
-        stepLines.push(result.seg)
-      }
+      if (seg) stepOverlayGroup.add(seg)
     }
 
     // Popped interval
     if (opts.poppedNode) {
       const n = opts.poppedNode
-      const result = makeSegments(
+      const seg = makeSegments(
         [n.left.x, n.left.y, 0, n.right.x, n.right.y, 0],
         poppedMat,
       )
-      if (result) {
-        stepOverlayGroup.add(result.seg)
-        stepGeometries.push(result.geom)
-        stepLines.push(result.seg)
-      }
+      if (seg) stepOverlayGroup.add(seg)
     }
   }
 
@@ -776,7 +662,7 @@ export function createThreeRenderer(): ThreeRenderer {
   }
 
   // ---------------------------------------------------------------------------
-  // Hit testing (pure math)
+  // Hit testing
   // ---------------------------------------------------------------------------
 
   function hitTestMarker(
@@ -795,7 +681,6 @@ export function createThreeRenderer(): ThreeRenderer {
     const distS = dxS * dxS + dyS * dyS
     const distG = dxG * dxG + dyG * dyG
     const r2 = radiusWorld * radiusWorld
-    // Prefer closer marker; start takes priority on tie
     if (distS <= r2 && distG <= r2) return distS <= distG ? "start" : "goal"
     if (distS <= r2) return "start"
     if (distG <= r2) return "goal"
@@ -809,13 +694,12 @@ export function createThreeRenderer(): ThreeRenderer {
   ): number | null {
     const p = screenToMesh(clientX, clientY)
     if (!p) return null
-    // Iterate in reverse (top-most first for visual z-order)
     for (let i = obstacles.length - 1; i >= 0; i--) {
       const o = obstacles[i]!
-      const x0 = o.cx - o.w / 2,
-        x1 = o.cx + o.w / 2
-      const y0 = o.cy - o.h / 2,
-        y1 = o.cy + o.h / 2
+      const x0 = o.cx - o.w / 2
+      const x1 = o.cx + o.w / 2
+      const y0 = o.cy - o.h / 2
+      const y1 = o.cy + o.h / 2
       if (p.x >= x0 && p.x <= x1 && p.y >= y0 && p.y <= y1) return i
     }
     return null
@@ -836,35 +720,13 @@ export function createThreeRenderer(): ThreeRenderer {
 
   function dispose() {
     ro.disconnect()
-
-    disposeGroupContent(staticGroup, staticGeometries, staticLines)
-    disposeGroupContent(obstacleGroup, obstacleGeometries, obstacleLines)
-    disposeGroupContent(stepOverlayGroup, stepGeometries, stepLines)
-
-    if (pathGeom) pathGeom.dispose()
-    if (pathLine) pathGroup.remove(pathLine)
-
-    // Dispose materials
-    polyFillMat.dispose()
-    interiorEdgeMat.dispose()
-    boundaryEdgeMat.dispose()
-    pathMat.dispose()
-    markerBgMat.dispose()
-    startFgMat.dispose()
-    goalFgMat.dispose()
-    expandedPolyMat.dispose()
-    openMat.dispose()
-    pushedMat.dispose()
-    prunedMat.dispose()
-    poppedMat.dispose()
-    obsFillMat.dispose()
-    obsSelectedFillMat.dispose()
-    obsStrokeMat.dispose()
-    obsSelectedStrokeMat.dispose()
-
+    disposeGroup(staticGroup)
+    disposeGroup(obstacleGroup)
+    disposeGroup(stepOverlayGroup)
+    disposeGroup(pathGroup)
+    disposeGroup(markerGroup)
+    for (const mat of allMaterials) mat.dispose()
     glRenderer.dispose()
-
-    // Remove DOM
     if (container.parentNode) container.parentNode.removeChild(container)
   }
 

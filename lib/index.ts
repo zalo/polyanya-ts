@@ -55,3 +55,9 @@ export { mergeMesh } from "./mesh-merger.ts"
 
 // Graph search (dual connectivity A*)
 export { graphSearch, type GraphSearchResult } from "./graph-search.ts"
+
+// Visibility graph search
+export {
+  visibilityGraphSearch,
+  type VisibilityGraphResult,
+} from "./visibility-graph.ts"
