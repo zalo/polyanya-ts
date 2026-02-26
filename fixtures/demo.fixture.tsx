@@ -13,7 +13,7 @@ import {
   buildMeshFromRegions,
   mergeMesh,
   graphSearch,
-  visibilityGraphSearch,
+  VisibilityGraph,
   type Point,
   type SearchNode,
   type StepEvent,
@@ -335,6 +335,7 @@ function runSearch(
   goal: Point,
   buildTimeMs: number,
   algorithm: SearchAlgorithm = "polyanya",
+  visGraph: VisibilityGraph | null = null,
 ): { path: Point[]; stats: Stats; visEdges?: { ax: number; ay: number; bx: number; by: number }[] } {
   if (algorithm === "graph-astar") {
     const t0 = performance.now()
@@ -356,7 +357,8 @@ function runSearch(
     }
   }
   if (algorithm === "visibility-graph") {
-    const result = visibilityGraphSearch(mesh, start, goal)
+    const graph = visGraph ?? new VisibilityGraph(mesh)
+    const result = graph.search(start, goal)
     return {
       path: result.path,
       stats: {
@@ -449,6 +451,8 @@ export default function PolyanyaDemo() {
   const [buildTimeMs, setBuildTimeMs] = useState(0)
   const meshCache = useRef(new Map<string, Mesh>())
   const fileMeshRef = useRef<Mesh | null>(null) // original file mesh for stats comparison
+  // Precomputed visibility graph — rebuilt when mesh changes, reused for every search
+  const visGraphRef = useRef<VisibilityGraph | null>(null)
 
   // --- editor state ---
   const [obstacles, setObstacles] = useState<Obstacle[]>(DEFAULT_OBSTACLES)
@@ -604,6 +608,11 @@ export default function PolyanyaDemo() {
     exitStepMode()
   }, [selectedId])
 
+  // --- rebuild visibility graph when mesh changes ---
+  useEffect(() => {
+    visGraphRef.current = mesh ? new VisibilityGraph(mesh) : null
+  }, [mesh])
+
   // --- compute path whenever mesh/start/goal/algorithm change (not during drag) ---
   useEffect(() => {
     if (!mesh) return
@@ -613,6 +622,7 @@ export default function PolyanyaDemo() {
       goal,
       buildTimeMs,
       searchAlgorithm,
+      visGraphRef.current,
     )
     setLivePath(path)
     setLiveStats(stats)
@@ -892,6 +902,7 @@ export default function PolyanyaDemo() {
                 curGoal,
                 buildTimeMs,
                 liveAlgorithm.current,
+                visGraphRef.current,
               )
               r.setPath(path)
               r.setMarkers(curStart, curGoal)

@@ -58,6 +58,7 @@ export { graphSearch, type GraphSearchResult } from "./graph-search.ts"
 
 // Visibility graph search
 export {
+  VisibilityGraph,
   visibilityGraphSearch,
   type VisibilityGraphResult,
 } from "./visibility-graph.ts"
