@@ -567,6 +567,10 @@ export class SearchInstance {
     do {
       const curNode = currentNodes[0]!
       if (curNode.nextPolygon === this.endPolygon) break
+      // In goalless mode we only care about the direct visibility region (root=-1).
+      // Once a non-observable successor fires (root ≠ -1), the corner's g-value is
+      // already recorded in rootGValues by succToNode — stop collapsing here.
+      if (this.goalless && curNode.root !== -1) break
 
       const succs = getSuccessors(curNode, this.start, this.mesh)
       this.successorCalls++
@@ -599,6 +603,11 @@ export class SearchInstance {
     // Push all resulting nodes onto the open list
     for (let i = 0; i < numNodes; i++) {
       const curNode = currentNodes[i]!
+
+      // In goalless mode, corners (root ≠ -1) have their g-value already written
+      // by succToNode. We don't need to expand from them — only the direct
+      // visibility region (root = -1) needs further expansion.
+      if (this.goalless && curNode.root !== -1) continue
 
       // Allocate the node and set its parent
       const n: SearchNode = { ...curNode }
