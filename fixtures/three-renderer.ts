@@ -122,7 +122,7 @@ export function createThreeRenderer(): ThreeRenderer {
   container.style.position = "relative"
 
   // --- WebGL renderer ---
-  const glRenderer = new THREE.WebGLRenderer({ antialias: false })
+  const glRenderer = new THREE.WebGLRenderer({ antialias: true })
   glRenderer.setClearColor(0x16213e)
   glRenderer.setPixelRatio(Math.min(window.devicePixelRatio, 1))
   container.appendChild(glRenderer.domElement)
@@ -168,117 +168,117 @@ export function createThreeRenderer(): ThreeRenderer {
   const resolution = new THREE.Vector2(1, 1)
 
   // --- Materials (all with depthTest: false, depthWrite: false for 2D ortho) ---
-  const noDepth = { depthTest: false, depthWrite: false } as const
-  const lineNoDepth = { ...noDepth } as const
+  //const noDepth = { depthTest: false, depthWrite: false } as const
+  //const lineNoDepth = { ...noDepth } as const
 
   const polyFillMat = new THREE.MeshBasicMaterial({
     color: 0x1a1a3e,
     transparent: true,
     opacity: 0.6,
-    ...noDepth,
+    //...noDepth,
   })
   const interiorEdgeMat = new LineMaterial({
     color: 0x4a4e69,
     transparent: true,
     opacity: 0.4,
-    worldUnits: true,
+    worldUnits: false,
     linewidth: 1,
-    ...lineNoDepth,
+    //...lineNoDepth,
   })
   const boundaryEdgeMat = new LineMaterial({
     color: 0xe94560,
-    transparent: true,
-    opacity: 0.8,
-    worldUnits: true,
+    transparent: false,
+    opacity: 1.0,
+    worldUnits: false,
     linewidth: 1,
-    ...lineNoDepth,
+    //...lineNoDepth,
   })
   const pathMat = new LineMaterial({
     color: 0x06d6a0,
-    worldUnits: true,
+    worldUnits: false,
     linewidth: 1,
-    ...lineNoDepth,
+    //...lineNoDepth,
   })
 
-  const markerBgMat = new THREE.MeshBasicMaterial({ color: 0xffffff, ...noDepth })
-  const startFgMat = new THREE.MeshBasicMaterial({ color: 0x06d6a0, ...noDepth })
-  const goalFgMat = new THREE.MeshBasicMaterial({ color: 0xf72585, ...noDepth })
+  const markerBgMat = new THREE.MeshBasicMaterial({ color: 0xffffff })
+  const startFgMat = new THREE.MeshBasicMaterial({ color: 0x06d6a0 })
+  const goalFgMat = new THREE.MeshBasicMaterial({ color: 0xf72585 })
 
   const expandedPolyMat = new THREE.MeshBasicMaterial({
     color: 0x4361ee,
     transparent: true,
     opacity: 0.5,
-    ...noDepth,
+    //...noDepth,
   })
   const openMat = new LineMaterial({
     color: 0xf8961e,
     transparent: true,
     opacity: 0.6,
-    worldUnits: true,
+    worldUnits: false,
     linewidth: 1,
-    ...lineNoDepth,
+    //...lineNoDepth,
   })
   const pushedMat = new LineMaterial({
     color: 0x2ec4b6,
     transparent: true,
     opacity: 0.9,
-    worldUnits: true,
+    worldUnits: false,
     linewidth: 1,
-    ...lineNoDepth,
+    //...lineNoDepth,
   })
   const prunedMat = new LineMaterial({
     color: 0x888888,
     transparent: true,
     opacity: 0.5,
-    worldUnits: true,
+    worldUnits: false,
     linewidth: 1,
     dashed: true,
     dashScale: 1,
     dashSize: 1,
     gapSize: 0.67,
-    ...lineNoDepth,
+    //...lineNoDepth,
   })
   const poppedMat = new LineMaterial({
     color: 0xf72585,
     transparent: true,
     opacity: 0.9,
-    worldUnits: true,
+    worldUnits: false,
     linewidth: 1,
-    ...lineNoDepth,
+    //...lineNoDepth,
   })
 
   const obsFillMat = new THREE.MeshBasicMaterial({
     color: 0xe94560,
     transparent: true,
     opacity: 0.4,
-    ...noDepth,
+    //...noDepth,
   })
   const obsSelectedFillMat = new THREE.MeshBasicMaterial({
     color: 0xf72585,
     transparent: true,
     opacity: 0.4,
-    ...noDepth,
+    //...noDepth,
   })
   const obsStrokeMat = new LineMaterial({
     color: 0xe94560,
-    worldUnits: true,
+    worldUnits: false,
     linewidth: 1,
-    ...lineNoDepth,
+    //...lineNoDepth,
   })
   const obsSelectedStrokeMat = new LineMaterial({
     color: 0xf72585,
-    worldUnits: true,
+    worldUnits: false,
     linewidth: 1,
-    ...lineNoDepth,
+    //...lineNoDepth,
   })
 
   const visEdgeMat = new LineMaterial({
     color: 0x8888cc,
     transparent: true,
     opacity: 0.3,
-    worldUnits: true,
+    worldUnits: false,
     linewidth: 1,
-    ...lineNoDepth,
+    //...lineNoDepth,
   })
 
   // All LineMaterials that need resolution updates
@@ -358,23 +358,18 @@ export function createThreeRenderer(): ThreeRenderer {
   }
 
   function updateLineWidths() {
-    const cw = container.clientWidth || 1
-    const visibleW = camera.right - camera.left
-    if (visibleW <= 0) return
-    const px = visibleW / cw
-
-    interiorEdgeMat.linewidth = px * 1.5
-    boundaryEdgeMat.linewidth = px * 3.0
-    pathMat.linewidth = px * 3.0
-    openMat.linewidth = px * 2.0
-    pushedMat.linewidth = px * 3.0
-    prunedMat.linewidth = px * 3.0
-    poppedMat.linewidth = px * 3.0
-    obsStrokeMat.linewidth = px * 3.0
-    obsSelectedStrokeMat.linewidth = px * 3.0
-    visEdgeMat.linewidth = px * 1.0
-    prunedMat.dashSize = px * 6
-    prunedMat.gapSize = px * 4
+    interiorEdgeMat.linewidth = 1.5
+    boundaryEdgeMat.linewidth = 3.0
+    pathMat.linewidth = 3.0
+    openMat.linewidth = 2.0
+    pushedMat.linewidth = 3.0
+    prunedMat.linewidth = 3.0
+    poppedMat.linewidth = 3.0
+    obsStrokeMat.linewidth = 3.0
+    obsSelectedStrokeMat.linewidth =  3.0
+    visEdgeMat.linewidth = 1.0
+    prunedMat.dashSize = 6
+    prunedMat.gapSize = 4
   }
 
   // ---------------------------------------------------------------------------
@@ -426,7 +421,7 @@ export function createThreeRenderer(): ThreeRenderer {
     if (triPositions.length > 0) {
       const geom = new THREE.BufferGeometry()
       geom.setAttribute("position", new THREE.Float32BufferAttribute(triPositions, 3))
-      staticGroup.add(new THREE.Mesh(geom, polyFillMat))
+      //staticGroup.add(new THREE.Mesh(geom, polyFillMat))
     }
 
     // --- Edges ---
@@ -452,9 +447,12 @@ export function createThreeRenderer(): ThreeRenderer {
       }
     }
 
+    // Offset to prevent z-fighting with obstacles
     const interior = makeSegments(interiorPos, interiorEdgeMat)
+    interior.position.z = -1.0; 
     if (interior) staticGroup.add(interior)
     const boundary = makeSegments(boundaryPos, boundaryEdgeMat)
+    boundary.position.z = -0.5; 
     if (boundary) staticGroup.add(boundary)
 
     updateCamera(bounds)
