@@ -39,9 +39,13 @@ export function visibilityGraphSearch(
 
   const buildT0 = performance.now()
 
-  // 1. Extract boundary segments
+  // 1. Extract boundary segments, tracking directed edges for convexity testing
   const segments: Segment[] = []
   const seen = new Set<string>()
+  // boundaryNext[v] = next vertex along directed boundary edge v→next
+  // boundaryPrev[v] = prev vertex along directed boundary edge prev→v
+  const boundaryNext = new Map<number, number>()
+  const boundaryPrev = new Map<number, number>()
   for (const poly of mesh.polygons) {
     if (!poly) continue
     const V = poly.vertices
@@ -59,13 +63,38 @@ export function visibilityGraphSearch(
       const pa = mesh.vertices[a]!.p
       const pb = mesh.vertices[b]!.p
       segments.push({ ax: pa.x, ay: pa.y, bx: pb.x, by: pb.y })
+      // Directed boundary edge a → b
+      boundaryNext.set(a, b)
+      boundaryPrev.set(b, a)
     }
   }
 
-  // 2. Extract corner vertices
+  // 2. Extract convex (reflex) corner vertices only.
+  // A corner vertex is useful iff the boundary makes a CW turn at it (cross < 0),
+  // meaning the obstacle subtends < 180° — i.e. it's a corner paths must wrap around.
+  // Flat (cross ≈ 0) and concave (cross > 0) corners never appear on shortest paths.
   const cornerIndices: number[] = []
   for (let i = 0; i < mesh.vertices.length; i++) {
-    if (mesh.vertices[i]!.isCorner) {
+    const v = mesh.vertices[i]!
+    if (!v.isCorner) continue
+    // Ambiguous corners: keep them (multiple obstacle gaps, complex case)
+    if (v.isAmbig) {
+      cornerIndices.push(i)
+      continue
+    }
+    const prevIdx = boundaryPrev.get(i)
+    const nextIdx = boundaryNext.get(i)
+    if (prevIdx === undefined || nextIdx === undefined) {
+      cornerIndices.push(i) // can't determine convexity, keep
+      continue
+    }
+    const A = mesh.vertices[prevIdx]!.p
+    const VP = v.p
+    const B = mesh.vertices[nextIdx]!.p
+    // cross((V-A), (B-V)): negative = CW turn = reflex vertex = keep
+    const dx1 = VP.x - A.x, dy1 = VP.y - A.y
+    const dx2 = B.x - VP.x, dy2 = B.y - VP.y
+    if (dx1 * dy2 - dy1 * dx2 < -EPSILON) {
       cornerIndices.push(i)
     }
   }
@@ -86,6 +115,36 @@ export function visibilityGraphSearch(
   }
   nodePoints[startIdx] = start
   nodePoints[goalIdx] = goal
+
+  // Precompute cone directions for each corner node.
+  // At a convex corner, the obstacle occupies a < 180° wedge bounded by the two
+  // directed boundary edges. Any edge pointing into that wedge can be skipped.
+  // coneHasCone[k] = 1 if cone data is valid for node k
+  // d_in = direction of incoming boundary edge (A→V)
+  // d_out = direction of outgoing boundary edge (V→B)
+  const coneHasCone = new Uint8Array(numCorners)
+  const coneDInX = new Float64Array(numCorners)
+  const coneDInY = new Float64Array(numCorners)
+  const coneDOutX = new Float64Array(numCorners)
+  const coneDOutY = new Float64Array(numCorners)
+  for (let k = 0; k < numCorners; k++) {
+    const vi = cornerIndices[k]!
+    const v = mesh.vertices[vi]!
+    if (v.isAmbig) continue
+    const prevIdx = boundaryPrev.get(vi)
+    const nextIdx = boundaryNext.get(vi)
+    if (prevIdx === undefined || nextIdx === undefined) continue
+    const A = mesh.vertices[prevIdx]!.p
+    const VP = v.p
+    const B = mesh.vertices[nextIdx]!.p
+    // d_in = A→V (unnormalized, sign is all that matters for cross products)
+    coneDInX[k] = VP.x - A.x
+    coneDInY[k] = VP.y - A.y
+    // d_out = V→B
+    coneDOutX[k] = B.x - VP.x
+    coneDOutY[k] = B.y - VP.y
+    coneHasCone[k] = 1
+  }
 
   // 5. Build adjacency using nearest-K candidates to avoid O(n²) on large meshes
   const adj: { to: number; dist: number }[][] = new Array(numNodes)
@@ -126,6 +185,21 @@ export function visibilityGraphSearch(
       addedEdge.add(edgeKey)
 
       const pj = nodePoints[j]!
+
+      // Cone filter: skip edges that point into the obstacle sector at either endpoint.
+      // At a convex corner, the obstacle occupies a wedge bounded by d_in and d_out.
+      // A direction D is in the obstacle sector iff cross(d_in, D) < 0 AND cross(d_out, D) < 0.
+      if (i < numCorners && coneHasCone[i]) {
+        const dx = pj.x - pi.x, dy = pj.y - pi.y
+        if (coneDInX[i]! * dy - coneDInY[i]! * dx < -EPSILON &&
+            coneDOutX[i]! * dy - coneDOutY[i]! * dx < -EPSILON) continue
+      }
+      if (j < numCorners && coneHasCone[j]) {
+        const dx = pi.x - pj.x, dy = pi.y - pj.y
+        if (coneDInX[j]! * dy - coneDInY[j]! * dx < -EPSILON &&
+            coneDOutX[j]! * dy - coneDOutY[j]! * dx < -EPSILON) continue
+      }
+
       if (isVisible(pi, pj, segments, bvh, mesh)) {
         const d = distance(pi, pj)
         adj[i]!.push({ to: j, dist: d })
