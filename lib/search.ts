@@ -178,7 +178,33 @@ export class SearchInstance {
 
     for (const succ of successors) {
       const nextPolygon = P[succ.polyLeftInd]!
-      if (nextPolygon === -1) continue
+      if (nextPolygon === -1) {
+        // In goalless mode, non-observable successors at boundary edges still have
+        // their turning corner directly visible from source — record its g-value.
+        if (this.goalless &&
+          (succ.type === SuccessorType.RIGHT_NON_OBSERVABLE ||
+           succ.type === SuccessorType.LEFT_NON_OBSERVABLE)
+        ) {
+          const pRoot: Point = parent.root === -1 ? this.start : this.mesh.vertices[parent.root]!.p
+          const recordCorner = (vertIdx: number, g: number) => {
+            if (vertIdx === -1) return
+            if (this.rootSearchIds[vertIdx] !== this.searchId) {
+              this.rootSearchIds[vertIdx] = this.searchId
+              this.rootGValues[vertIdx] = g
+            } else if (this.rootGValues[vertIdx]! + EPSILON >= g) {
+              this.rootGValues[vertIdx] = g
+            }
+          }
+          if (succ.type === SuccessorType.RIGHT_NON_OBSERVABLE) {
+            if (rightG === -1) rightG = parent.g + distance(pRoot, parent.right)
+            recordCorner(parent.rightVertex, rightG)
+          } else {
+            if (leftG === -1) leftG = parent.g + distance(pRoot, parent.left)
+            recordCorner(parent.leftVertex, leftG)
+          }
+        }
+        continue
+      }
 
       // Skip one-way polygons that aren't the end (but never in goalless mode)
       if (
@@ -784,6 +810,27 @@ export class SearchInstance {
         result.set(i, g)
       }
     }
+
+    // Post-process: corners in adjacent polygons are always directly visible
+    // (polygons in a Polyanya mesh are convex). This catches corners that are
+    // only reachable via OBSERVABLE successors pointing to boundary edges —
+    // those are skipped in succToNode so they never appear as non-observable roots.
+    const pl = this.resolvePointLocation(from)
+    if (pl.vertex1 >= 0) {
+      for (const polyIdx of this.mesh.vertices[pl.vertex1]!.polygons) {
+        if (polyIdx < 0) continue
+        for (const vIdx of this.mesh.polygons[polyIdx]!.vertices) {
+          if (vIdx === pl.vertex1) continue
+          const v = this.mesh.vertices[vIdx]!
+          if (!v.isCorner) continue
+          const d = distance(from, v.p)
+          if (!result.has(vIdx) || result.get(vIdx)! > d) {
+            result.set(vIdx, d)
+          }
+        }
+      }
+    }
+
     return result
   }
 
