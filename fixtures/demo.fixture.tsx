@@ -448,7 +448,10 @@ export default function PolyanyaDemo() {
   // --- mesh state ---
   const [mesh, setMesh] = useState<Mesh | null>(null)
   const [loading, setLoading] = useState(false)
-  const [buildTimeMs, setBuildTimeMs] = useState(0)
+  const [cdtTimeMs, setCdtTimeMs] = useState(0)
+  const [mergeTimeMs, setMergeTimeMs] = useState(0)
+  const [vgTimeMs, setVgTimeMs] = useState(0)
+  const buildTimeMs = cdtTimeMs + mergeTimeMs + vgTimeMs
   const meshCache = useRef(new Map<string, Mesh>())
   const fileMeshRef = useRef<Mesh | null>(null) // original file mesh for stats comparison
   // Precomputed visibility graph — rebuilt when mesh changes, reused for every search
@@ -535,14 +538,17 @@ export default function PolyanyaDemo() {
       if (!result) return // CDT failed — keep previous mesh
       const { mesh: cdtMesh, buildTimeMs: cdtBt } = result
       if (effectiveMethod === "merge") {
+        const mergeT0 = performance.now()
         const m = mergeMesh(cdtMesh)
-        const bt = performance.now() - t0
+        const mergeBt = performance.now() - mergeT0
         setMesh(m)
-        setBuildTimeMs(bt)
+        setCdtTimeMs(cdtBt)
+        setMergeTimeMs(mergeBt)
         fileMeshRef.current = cdtMesh
       } else {
         setMesh(cdtMesh)
-        setBuildTimeMs(cdtBt)
+        setCdtTimeMs(cdtBt)
+        setMergeTimeMs(0)
         fileMeshRef.current = null
       }
       return
@@ -554,7 +560,8 @@ export default function PolyanyaDemo() {
     const cached = meshCache.current.get(cacheKey)
     if (cached) {
       setMesh(cached)
-      setBuildTimeMs(0)
+      setCdtTimeMs(0)
+      setMergeTimeMs(0)
       if (effectiveMethod === "merge" && !fileMeshRef.current) {
         const fileCached = meshCache.current.get(entry.id)
         if (fileCached) fileMeshRef.current = fileCached
@@ -583,13 +590,15 @@ export default function PolyanyaDemo() {
         if (effectiveMethod === "merge") {
           const t0 = performance.now()
           const m = mergeMesh(fileMesh)
-          const bt = performance.now() - t0
+          const mergeBt = performance.now() - t0
           meshCache.current.set(cacheKey, m)
           setMesh(m)
-          setBuildTimeMs(bt)
+          setCdtTimeMs(0)
+          setMergeTimeMs(mergeBt)
         } else {
           setMesh(fileMesh)
-          setBuildTimeMs(0)
+          setCdtTimeMs(0)
+          setMergeTimeMs(0)
         }
       })
       .finally(() => setLoading(false))
@@ -613,7 +622,7 @@ export default function PolyanyaDemo() {
     if (!mesh) { visGraphRef.current = null; return }
     const vg = new VisibilityGraph(mesh)
     visGraphRef.current = vg
-    setBuildTimeMs(prev => prev + vg.buildTimeMs)
+    setVgTimeMs(vg.buildTimeMs)
   }, [mesh])
 
   // --- compute path whenever mesh/start/goal/algorithm change (not during drag) ---
@@ -1301,7 +1310,9 @@ export default function PolyanyaDemo() {
               value={displayStats.pathLength.toFixed(4)}
             />
           )}
-          <Row label="Mesh build" value={fmtTime(buildTimeMs)} />
+          {cdtTimeMs > 0 && <Row label="CDT build" value={fmtTime(cdtTimeMs)} />}
+          {mergeTimeMs > 0 && <Row label="Poly. merge" value={fmtTime(mergeTimeMs)} />}
+          <Row label="Vis. graph" value={fmtTime(vgTimeMs)} />
           <Row label="Search" value={fmtTime(displayStats.searchTimeMs)} />
           {(effectiveMethod === "cdt" || effectiveMethod === "merge") &&
             fileMeshRef.current &&
