@@ -1,6 +1,14 @@
 import cdt2d from "cdt2d"
 import { resolveConstraintCrossings } from "./resolve-constraint-crossings.ts"
-import type { Point } from "./types.ts"
+import type { Point, WeightedRegion } from "./types.ts"
+
+/**
+ * Result of CDT triangulation including per-region weight data.
+ */
+export interface CdtResult {
+  regions: Point[][]
+  regionWeights: { weight: number; penalty: number }[]
+}
 
 /**
  * CDT-triangulate the free space inside `bounds` around obstacle polygons.
@@ -8,8 +16,7 @@ import type { Point } from "./types.ts"
  * Each obstacle is a closed polygon (array of Point). The function generates
  * boundary sample points, builds constraint edges, runs constrained Delaunay
  * triangulation via cdt2d, and filters out triangles whose centroid falls
- * inside an obstacle. Returns Point[][] regions (triangles) suitable for
- * buildMeshFromRegions.
+ * inside an obstacle. Returns CdtResult with regions and per-region weights.
  *
  * For rectangular obstacles with clearance, expand the rects into polygons
  * before calling this function.
@@ -17,8 +24,9 @@ import type { Point } from "./types.ts"
 export function cdtTriangulate(input: {
   bounds: { minX: number; maxX: number; minY: number; maxY: number }
   obstacles: Point[][]
-}): Point[][] {
-  const { bounds, obstacles } = input
+  weightedRegions?: WeightedRegion[]
+}): CdtResult {
+  const { bounds, obstacles, weightedRegions } = input
   const { minX, maxX, minY, maxY } = bounds
 
   const pts: [number, number][] = []
@@ -86,6 +94,24 @@ export function cdtTriangulate(input: {
     }
   }
 
+  // --- Weighted region polygon rings ---
+  const wrPolygons = weightedRegions ?? []
+  for (const wr of wrPolygons) {
+    if (wr.polygon.length < 3) continue
+    ringBoundaries.push(edges.length)
+    const ringStart = pts.length
+    for (let i = 0; i < wr.polygon.length; i++) {
+      const p = wr.polygon[i]!
+      pts.push([
+        p.x + ((i % 7) - 3) * 1e-8,
+        p.y + ((i % 5) - 2) * 1e-8,
+      ])
+    }
+    for (let i = 0; i < wr.polygon.length; i++) {
+      edges.push([ringStart + i, ringStart + (i + 1) % wr.polygon.length])
+    }
+  }
+
   // --- Resolve crossing constraint edges from overlapping obstacles ---
   const resolved = resolveConstraintCrossings(pts, edges, ringBoundaries)
 
@@ -101,15 +127,32 @@ export function cdtTriangulate(input: {
     return !pointInAnyObstacle(cx, cy, obstacles)
   })
 
-  // --- Convert to Point[][] regions ---
-  return filtered.map(([a, b, c]) => {
+  // --- Convert to Point[][] regions with weight assignment ---
+  const regions: Point[][] = []
+  const regionWeights: { weight: number; penalty: number }[] = []
+
+  for (const [a, b, c] of filtered) {
     const pa = { x: rPts[a]![0], y: rPts[a]![1] }
     const pb = { x: rPts[b]![0], y: rPts[b]![1] }
     const pc = { x: rPts[c]![0], y: rPts[c]![1] }
     // Ensure CCW winding
     const cross = (pb.x - pa.x) * (pc.y - pa.y) - (pb.y - pa.y) * (pc.x - pa.x)
-    return cross >= 0 ? [pa, pb, pc] : [pa, pc, pb]
-  })
+    regions.push(cross >= 0 ? [pa, pb, pc] : [pa, pc, pb])
+
+    // Determine weight from weighted regions (test centroid)
+    const cx = (pa.x + pb.x + pc.x) / 3
+    const cy = (pa.y + pb.y + pc.y) / 3
+    let rw = { weight: 1, penalty: 0 }
+    for (const wr of wrPolygons) {
+      if (pointInPolygon(cx, cy, wr.polygon)) {
+        rw = { weight: wr.weight, penalty: wr.penalty }
+        break
+      }
+    }
+    regionWeights.push(rw)
+  }
+
+  return { regions, regionWeights }
 }
 
 /** Ray-casting point-in-polygon test */

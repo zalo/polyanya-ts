@@ -203,6 +203,8 @@ export class Mesh {
         maxX: pMaxX,
         minY: pMinY,
         maxY: pMaxY,
+        weight: 1.0,
+        penalty: 0.0,
       }
     }
   }

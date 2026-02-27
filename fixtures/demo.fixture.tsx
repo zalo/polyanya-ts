@@ -19,7 +19,8 @@ import {
   type StepEvent,
 } from "../lib/index"
 import { cdtTriangulate, rectToPolygon } from "../lib/cdt-builder"
-import { createThreeRenderer, type ThreeRenderer } from "./three-renderer"
+import type { WeightedRegion } from "../lib/types"
+import { createThreeRenderer, type ThreeRenderer, type WeightedRect } from "./three-renderer"
 
 const BASE = import.meta.env.BASE_URL
 
@@ -305,19 +306,25 @@ function pathLen(pts: Point[]) {
 // Build mesh from editor obstacles using CDT
 // ---------------------------------------------------------------------------
 
-function buildMeshFromObstacles(obstacles: Obstacle[], clearance: number) {
+function buildMeshFromObstacles(obstacles: Obstacle[], clearance: number, weightedRects: WeightedRect[] = []) {
   const t0 = performance.now()
   try {
     const obstaclePolygons = obstacles.map((o) =>
       rectToPolygon(o.cx, o.cy, o.w, o.h, clearance),
     )
-    const regions = cdtTriangulate({
+    const weightedRegions: WeightedRegion[] = weightedRects.map((wr) => ({
+      polygon: rectToPolygon(wr.cx, wr.cy, wr.w, wr.h, 0),
+      weight: wr.weight,
+      penalty: wr.penalty,
+    }))
+    const result = cdtTriangulate({
       bounds: DEFAULT_BOUNDS,
       obstacles: obstaclePolygons,
+      weightedRegions,
     })
-    const mesh = buildMeshFromRegions({ regions })
+    const mesh = buildMeshFromRegions({ regions: result.regions, regionWeights: result.regionWeights })
     const buildTimeMs = performance.now() - t0
-    return { mesh, buildTimeMs, regionCount: regions.length }
+    return { mesh, buildTimeMs, regionCount: result.regions.length }
   } catch {
     return null
   }
@@ -466,6 +473,13 @@ export default function PolyanyaDemo() {
     null,
   )
 
+  // --- weighted region state ---
+  const [weightedRects, setWeightedRects] = useState<WeightedRect[]>([])
+  const [selectedWr, setSelectedWr] = useState<number | null>(null)
+  const draggingWr = useRef<{ id: number; offX: number; offY: number } | null>(null)
+  /** What double-click adds: "obstacle" or "weighted" */
+  const [addMode, setAddMode] = useState<"obstacle" | "weighted">("obstacle")
+
   // --- search algorithm ---
   const [searchAlgorithm, setSearchAlgorithm] =
     useState<SearchAlgorithm>("polyanya")
@@ -534,7 +548,7 @@ export default function PolyanyaDemo() {
   useEffect(() => {
     if (isEditor) {
       const t0 = performance.now()
-      const result = buildMeshFromObstacles(obstacles, clearance)
+      const result = buildMeshFromObstacles(obstacles, clearance, weightedRects)
       if (!result) return // CDT failed — keep previous mesh
       const { mesh: cdtMesh, buildTimeMs: cdtBt } = result
       if (effectiveMethod === "merge") {
@@ -604,7 +618,7 @@ export default function PolyanyaDemo() {
       .finally(() => setLoading(false))
   }, [
     isEditor
-      ? `editor-${effectiveMethod}-${JSON.stringify(obstacles)}-${clearance}`
+      ? `editor-${effectiveMethod}-${JSON.stringify(obstacles)}-${clearance}-${JSON.stringify(weightedRects)}`
       : `${entry.id}:${effectiveMethod}`,
   ])
 
@@ -614,6 +628,9 @@ export default function PolyanyaDemo() {
     setGoal(entry.goal)
     setBuildMethod(selectedId === "editor" ? "cdt" : "file")
     setSearchAlgorithm("polyanya")
+    setWeightedRects([])
+    setSelectedWr(null)
+    setAddMode("obstacle")
     exitStepMode()
   }, [selectedId])
 
@@ -690,6 +707,18 @@ export default function PolyanyaDemo() {
     }
     r.render()
   }, [isEditor, obstacles, selectedObs, sw])
+
+  // Update weighted region display
+  useEffect(() => {
+    const r = rendererRef.current
+    if (!r) return
+    if (isEditor) {
+      r.setWeightedRegions(weightedRects, selectedWr, sw)
+    } else {
+      r.setWeightedRegions([], null, sw)
+    }
+    r.render()
+  }, [isEditor, weightedRects, selectedWr, sw])
 
   // Update path display
   const inStep = mode !== "live"
@@ -860,6 +889,7 @@ export default function PolyanyaDemo() {
           const p = r.screenToMesh(e.clientX, e.clientY)
           if (p) {
             setSelectedObs(obs.id)
+            setSelectedWr(null)
             draggingObs.current = {
               id: obs.id,
               offX: obs.cx - p.x,
@@ -868,10 +898,30 @@ export default function PolyanyaDemo() {
           }
           return
         }
+
+        // Hit-test weighted regions
+        const wrIdx = r.hitTestWeightedRect(e.clientX, e.clientY, weightedRects)
+        if (wrIdx !== null) {
+          e.preventDefault()
+          e.stopPropagation()
+          e.currentTarget.setPointerCapture(e.pointerId)
+          const wr = weightedRects[wrIdx]!
+          const p = r.screenToMesh(e.clientX, e.clientY)
+          if (p) {
+            setSelectedWr(wr.id)
+            setSelectedObs(null)
+            draggingWr.current = {
+              id: wr.id,
+              offX: wr.cx - p.x,
+              offY: wr.cy - p.y,
+            }
+          }
+          return
+        }
       }
 
-      // Click on empty space — deselect obstacle + drag nearest point
-      if (isEditor) setSelectedObs(null)
+      // Click on empty space — deselect obstacle/weighted region + drag nearest point
+      if (isEditor) { setSelectedObs(null); setSelectedWr(null) }
       const p = r.screenToMesh(e.clientX, e.clientY)
       if (p) {
         const dxS = p.x - start.x,
@@ -887,7 +937,7 @@ export default function PolyanyaDemo() {
         draggingRef.current = nearest
       }
     },
-    [start, goal, markerR, mode, exitStepMode, isEditor, obstacles],
+    [start, goal, markerR, mode, exitStepMode, isEditor, obstacles, weightedRects],
   )
 
   const onCanvasMove = useCallback(
@@ -943,6 +993,20 @@ export default function PolyanyaDemo() {
         )
         return
       }
+      // --- drag weighted region in editor ---
+      const wrDrag = draggingWr.current
+      if (wrDrag && isEditor) {
+        const p = r.screenToMesh(e.clientX, e.clientY)
+        if (!p) return
+        setWeightedRects((prev) =>
+          prev.map((wr) =>
+            wr.id === wrDrag.id
+              ? { ...wr, cx: p.x + wrDrag.offX, cy: p.y + wrDrag.offY }
+              : wr,
+          ),
+        )
+        return
+      }
 
       // --- cursor management (hover) ---
       const marker = r.hitTestMarker(
@@ -962,10 +1026,15 @@ export default function PolyanyaDemo() {
           r.container.style.cursor = "move"
           return
         }
+        const wrIdx = r.hitTestWeightedRect(e.clientX, e.clientY, weightedRects)
+        if (wrIdx !== null) {
+          r.container.style.cursor = "move"
+          return
+        }
       }
       r.container.style.cursor = "default"
     },
-    [mesh, buildTimeMs, isEditor, obstacles, start, goal, markerR],
+    [mesh, buildTimeMs, isEditor, obstacles, weightedRects, start, goal, markerR],
   )
 
   const onCanvasUp = useCallback((e?: React.PointerEvent) => {
@@ -981,10 +1050,11 @@ export default function PolyanyaDemo() {
     }
     draggingRef.current = null
     draggingObs.current = null
+    draggingWr.current = null
     if (r) r.container.style.cursor = "default"
   }, [])
 
-  // --- editor: add obstacle on double-click ---
+  // --- editor: add obstacle or weighted region on double-click ---
   const onCanvasDblClick = useCallback(
     (e: React.MouseEvent) => {
       if (!isEditor) return
@@ -992,13 +1062,20 @@ export default function PolyanyaDemo() {
       if (!r) return
       const p = r.screenToMesh(e.clientX, e.clientY)
       if (!p) return
-      setObstacles((prev) => [
-        ...prev,
-        { id: nextId, cx: p.x, cy: p.y, w: 2, h: 2 },
-      ])
+      if (addMode === "weighted") {
+        setWeightedRects((prev) => [
+          ...prev,
+          { id: nextId, cx: p.x, cy: p.y, w: 3, h: 3, weight: 2.0, penalty: 0.0 },
+        ])
+      } else {
+        setObstacles((prev) => [
+          ...prev,
+          { id: nextId, cx: p.x, cy: p.y, w: 2, h: 2 },
+        ])
+      }
       setNextId((n) => n + 1)
     },
-    [isEditor, nextId],
+    [isEditor, nextId, addMode],
   )
 
   const deleteSelected = useCallback(() => {
@@ -1141,7 +1218,28 @@ export default function PolyanyaDemo() {
           <div style={cardStyle}>
             <div style={cardTitle}>Obstacle Editor</div>
             <div style={{ fontSize: 11, color: "#8d99ae", marginBottom: 6 }}>
-              Double-click to add obstacles. Click to select, drag to move.
+              Double-click to add. Click to select, drag to move.
+            </div>
+            <label style={labelStyle}>Double-click adds</label>
+            <div style={{ display: "flex", gap: 6, marginBottom: 4 }}>
+              <button
+                onClick={() => setAddMode("obstacle")}
+                style={{
+                  ...toggleBtnStyle,
+                  background: addMode === "obstacle" ? "#e94560" : "#1a1a3e",
+                }}
+              >
+                Obstacle
+              </button>
+              <button
+                onClick={() => setAddMode("weighted")}
+                style={{
+                  ...toggleBtnStyle,
+                  background: addMode === "weighted" ? "#f8961e" : "#1a1a3e",
+                }}
+              >
+                Weighted Region
+              </button>
             </div>
             <label style={labelStyle}>Clearance: {clearance.toFixed(2)}</label>
             <input
@@ -1216,6 +1314,106 @@ export default function PolyanyaDemo() {
             >
               Reset obstacles
             </Btn>
+          </div>
+        )}
+
+        {/* Weighted Regions controls */}
+        {isEditor && (
+          <div style={cardStyle}>
+            <div style={{ ...cardTitle, color: "#f8961e" }}>Weighted Regions</div>
+            {selectedWr !== null && (() => {
+              const wr = weightedRects.find((r) => r.id === selectedWr)
+              if (!wr) return null
+              return (
+                <>
+                  <div style={{ display: "flex", gap: 8, marginBottom: 4 }}>
+                    <Btn bg="#f8961e" onClick={() => {
+                      setWeightedRects((prev) => prev.filter((r) => r.id !== selectedWr))
+                      setSelectedWr(null)
+                    }}>Delete</Btn>
+                  </div>
+                  <label style={labelStyle}>Weight: {wr.weight.toFixed(1)}</label>
+                  <input
+                    type="range"
+                    min={1}
+                    max={10}
+                    step={0.5}
+                    value={wr.weight}
+                    onChange={(e) =>
+                      setWeightedRects((prev) =>
+                        prev.map((r) =>
+                          r.id === selectedWr ? { ...r, weight: Number(e.target.value) } : r
+                        ),
+                      )
+                    }
+                    style={{ width: "100%" }}
+                  />
+                  <label style={labelStyle}>Penalty: {wr.penalty.toFixed(1)}</label>
+                  <input
+                    type="range"
+                    min={0}
+                    max={20}
+                    step={0.5}
+                    value={wr.penalty}
+                    onChange={(e) =>
+                      setWeightedRects((prev) =>
+                        prev.map((r) =>
+                          r.id === selectedWr ? { ...r, penalty: Number(e.target.value) } : r
+                        ),
+                      )
+                    }
+                    style={{ width: "100%" }}
+                  />
+                  <div style={{ display: "flex", gap: 8, marginTop: 4 }}>
+                    <label style={{ ...labelStyle, flex: 1 }}>
+                      W
+                      <input
+                        type="number"
+                        value={wr.w}
+                        step={0.5}
+                        min={0.5}
+                        onChange={(e) =>
+                          setWeightedRects((prev) =>
+                            prev.map((r) =>
+                              r.id === selectedWr ? { ...r, w: Number(e.target.value) } : r
+                            ),
+                          )
+                        }
+                        style={numInputStyle}
+                      />
+                    </label>
+                    <label style={{ ...labelStyle, flex: 1 }}>
+                      H
+                      <input
+                        type="number"
+                        value={wr.h}
+                        step={0.5}
+                        min={0.5}
+                        onChange={(e) =>
+                          setWeightedRects((prev) =>
+                            prev.map((r) =>
+                              r.id === selectedWr ? { ...r, h: Number(e.target.value) } : r
+                            ),
+                          )
+                        }
+                        style={numInputStyle}
+                      />
+                    </label>
+                  </div>
+                </>
+              )
+            })()}
+            {weightedRects.length > 0 && (
+              <Btn
+                bg="#4a4e69"
+                onClick={() => {
+                  setWeightedRects([])
+                  setSelectedWr(null)
+                }}
+              >
+                Clear all
+              </Btn>
+            )}
           </div>
         )}
 
@@ -1338,6 +1536,7 @@ export default function PolyanyaDemo() {
           <Legend color="#06d6a0" label="Start / Path" />
           <Legend color="#f72585" label="Goal / Popped interval" />
           <Legend color="#e94560" label="Boundary / Obstacles" />
+          <Legend color="#f8961e" label="Weighted regions" />
           {inStep && (
             <>
               <Legend color="#4361ee" label="Expanding polygon" />

@@ -9,6 +9,7 @@ import type { Point, Polygon, Vertex } from "./types.ts"
  */
 export interface MeshBuilderInput {
   regions: Point[][]
+  regionWeights?: { weight: number; penalty: number }[]
 }
 
 /**
@@ -105,6 +106,7 @@ export function buildMeshFromRegions(input: MeshBuilderInput): Mesh {
       }
     }
 
+    const rw = input.regionWeights?.[pi]
     return {
       vertices: verts,
       polygons: adjPolys,
@@ -113,6 +115,8 @@ export function buildMeshFromRegions(input: MeshBuilderInput): Mesh {
       maxX,
       minY,
       maxY,
+      weight: rw?.weight ?? 1.0,
+      penalty: rw?.penalty ?? 0.0,
     }
   })
 

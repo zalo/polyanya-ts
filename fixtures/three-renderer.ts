@@ -29,6 +29,16 @@ interface Obstacle {
   h: number
 }
 
+export interface WeightedRect {
+  id: number
+  cx: number
+  cy: number
+  w: number
+  h: number
+  weight: number
+  penalty: number
+}
+
 export interface StepOverlayOpts {
   mesh: Mesh
   expandedPoly?: number
@@ -44,6 +54,11 @@ export interface ThreeRenderer {
   setMesh(mesh: Mesh, bounds: Bounds): void
   setObstacles(
     obstacles: Obstacle[],
+    selectedId: number | null,
+    sw: number,
+  ): void
+  setWeightedRegions(
+    regions: WeightedRect[],
     selectedId: number | null,
     sw: number,
   ): void
@@ -64,6 +79,11 @@ export interface ThreeRenderer {
     clientX: number,
     clientY: number,
     obstacles: Obstacle[],
+  ): number | null
+  hitTestWeightedRect(
+    clientX: number,
+    clientY: number,
+    regions: WeightedRect[],
   ): number | null
   render(): void
   readonly container: HTMLDivElement
@@ -153,6 +173,8 @@ export function createThreeRenderer(): ThreeRenderer {
   // --- Scene groups at different z-layers ---
   const staticGroup = new THREE.Group()
   staticGroup.position.z = 0
+  const weightedRegionGroup = new THREE.Group()
+  weightedRegionGroup.position.z = 0.05
   const obstacleGroup = new THREE.Group()
   obstacleGroup.position.z = 0.1
   const stepOverlayGroup = new THREE.Group()
@@ -161,7 +183,7 @@ export function createThreeRenderer(): ThreeRenderer {
   pathGroup.position.z = 0.3
   const markerGroup = new THREE.Group()
   markerGroup.position.z = 0.4
-  scene.add(staticGroup, obstacleGroup, stepOverlayGroup, pathGroup, markerGroup)
+  scene.add(staticGroup, weightedRegionGroup, obstacleGroup, stepOverlayGroup, pathGroup, markerGroup)
 
   // --- State ---
   let currentBounds: Bounds | null = null
@@ -272,6 +294,29 @@ export function createThreeRenderer(): ThreeRenderer {
     //...lineNoDepth,
   })
 
+  const wrFillMat = new THREE.MeshBasicMaterial({
+    color: 0xf8961e,
+    transparent: true,
+    opacity: 0.2,
+  })
+  const wrSelectedFillMat = new THREE.MeshBasicMaterial({
+    color: 0xf8961e,
+    transparent: true,
+    opacity: 0.35,
+  })
+  const wrStrokeMat = new LineMaterial({
+    color: 0xf8961e,
+    transparent: true,
+    opacity: 0.6,
+    worldUnits: false,
+    linewidth: 1,
+  })
+  const wrSelectedStrokeMat = new LineMaterial({
+    color: 0xf8961e,
+    worldUnits: false,
+    linewidth: 1,
+  })
+
   const visEdgeMat = new LineMaterial({
     color: 0x8888cc,
     transparent: true,
@@ -292,6 +337,8 @@ export function createThreeRenderer(): ThreeRenderer {
     poppedMat,
     obsStrokeMat,
     obsSelectedStrokeMat,
+    wrStrokeMat,
+    wrSelectedStrokeMat,
     visEdgeMat,
   ]
 
@@ -305,6 +352,8 @@ export function createThreeRenderer(): ThreeRenderer {
     expandedPolyMat,
     obsFillMat,
     obsSelectedFillMat,
+    wrFillMat,
+    wrSelectedFillMat,
   ]
 
   // ---------------------------------------------------------------------------
@@ -367,6 +416,8 @@ export function createThreeRenderer(): ThreeRenderer {
     poppedMat.linewidth = 3.0
     obsStrokeMat.linewidth = 3.0
     obsSelectedStrokeMat.linewidth =  3.0
+    wrStrokeMat.linewidth = 3.0
+    wrSelectedStrokeMat.linewidth = 3.0
     visEdgeMat.linewidth = 1.0
     prunedMat.dashSize = 6
     prunedMat.gapSize = 4
@@ -501,6 +552,70 @@ export function createThreeRenderer(): ThreeRenderer {
       )
       if (outline) obstacleGroup.add(outline)
     }
+  }
+
+  // ---------------------------------------------------------------------------
+  // setWeightedRegions
+  // ---------------------------------------------------------------------------
+
+  function setWeightedRegions(
+    regions: WeightedRect[],
+    selectedId: number | null,
+    _sw: number,
+  ) {
+    disposeGroup(weightedRegionGroup)
+    if (regions.length === 0) return
+
+    for (const wr of regions) {
+      const isSelected = wr.id === selectedId
+      const x0 = wr.cx - wr.w / 2
+      const x1 = wr.cx + wr.w / 2
+      const y0 = wr.cy - wr.h / 2
+      const y1 = wr.cy + wr.h / 2
+
+      // Fill quad
+      const fillGeom = new THREE.BufferGeometry()
+      fillGeom.setAttribute(
+        "position",
+        new THREE.Float32BufferAttribute(
+          [x0, y0, 0, x1, y0, 0, x1, y1, 0, x0, y0, 0, x1, y1, 0, x0, y1, 0],
+          3,
+        ),
+      )
+      weightedRegionGroup.add(
+        new THREE.Mesh(fillGeom, isSelected ? wrSelectedFillMat : wrFillMat),
+      )
+
+      // Outline
+      const outline = makeSegments(
+        [
+          x0, y0, 0, x1, y0, 0,
+          x1, y0, 0, x1, y1, 0,
+          x1, y1, 0, x0, y1, 0,
+          x0, y1, 0, x0, y0, 0,
+        ],
+        isSelected ? wrSelectedStrokeMat : wrStrokeMat,
+      )
+      if (outline) weightedRegionGroup.add(outline)
+    }
+  }
+
+  function hitTestWeightedRect(
+    clientX: number,
+    clientY: number,
+    regions: WeightedRect[],
+  ): number | null {
+    const p = screenToMesh(clientX, clientY)
+    if (!p) return null
+    for (let i = regions.length - 1; i >= 0; i--) {
+      const wr = regions[i]!
+      const x0 = wr.cx - wr.w / 2
+      const x1 = wr.cx + wr.w / 2
+      const y0 = wr.cy - wr.h / 2
+      const y1 = wr.cy + wr.h / 2
+      if (p.x >= x0 && p.x <= x1 && p.y >= y0 && p.y <= y1) return i
+    }
+    return null
   }
 
   // ---------------------------------------------------------------------------
@@ -746,6 +861,7 @@ export function createThreeRenderer(): ThreeRenderer {
   function dispose() {
     ro.disconnect()
     disposeGroup(staticGroup)
+    disposeGroup(weightedRegionGroup)
     disposeGroup(obstacleGroup)
     disposeGroup(stepOverlayGroup)
     disposeGroup(pathGroup)
@@ -763,6 +879,7 @@ export function createThreeRenderer(): ThreeRenderer {
     dispose,
     setMesh,
     setObstacles,
+    setWeightedRegions,
     setPath,
     setVisibilityEdges,
     setMarkers,
@@ -771,6 +888,7 @@ export function createThreeRenderer(): ThreeRenderer {
     screenToMesh,
     hitTestMarker,
     hitTestObstacle,
+    hitTestWeightedRect,
     render,
     container,
   }

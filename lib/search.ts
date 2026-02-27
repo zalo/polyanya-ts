@@ -171,6 +171,8 @@ export class SearchInstance {
     const polygon = this.mesh.polygons[parent.nextPolygon]!
     const V = polygon.vertices
     const P = polygon.polygons
+    const polyWeight = polygon.weight
+    const polyPenalty = polygon.penalty
 
     let rightG = -1
     let leftG = -1
@@ -196,10 +198,10 @@ export class SearchInstance {
             }
           }
           if (succ.type === SuccessorType.RIGHT_NON_OBSERVABLE) {
-            if (rightG === -1) rightG = parent.g + distance(pRoot, parent.right)
+            if (rightG === -1) rightG = parent.g + distance(pRoot, parent.right) * polyWeight + polyPenalty
             recordCorner(parent.rightVertex, rightG)
           } else {
-            if (leftG === -1) leftG = parent.g + distance(pRoot, parent.left)
+            if (leftG === -1) leftG = parent.g + distance(pRoot, parent.left) * polyWeight + polyPenalty
             recordCorner(parent.leftVertex, leftG)
           }
         }
@@ -253,18 +255,25 @@ export class SearchInstance {
       switch (succ.type) {
         case SuccessorType.RIGHT_NON_OBSERVABLE:
           if (rightG === -1) {
-            rightG = parent.g + distance(parentRoot, parent.right)
+            rightG = parent.g + distance(parentRoot, parent.right) * polyWeight + polyPenalty
           }
           pushNode(parent.rightVertex, rightG)
           break
 
         case SuccessorType.OBSERVABLE:
-          pushNode(parent.root, parent.g)
+          if (polyWeight !== 1 || polyPenalty !== 0) {
+            const midParent = { x: (parent.left.x + parent.right.x) / 2, y: (parent.left.y + parent.right.y) / 2 }
+            const midSucc = { x: (succ.left.x + succ.right.x) / 2, y: (succ.left.y + succ.right.y) / 2 }
+            const traverseDist = distance(midParent, midSucc)
+            pushNode(parent.root, parent.g + traverseDist * (polyWeight - 1.0) + polyPenalty)
+          } else {
+            pushNode(parent.root, parent.g)
+          }
           break
 
         case SuccessorType.LEFT_NON_OBSERVABLE:
           if (leftG === -1) {
-            leftG = parent.g + distance(parentRoot, parent.left)
+            leftG = parent.g + distance(parentRoot, parent.left) * polyWeight + polyPenalty
           }
           pushNode(parent.leftVertex, leftG)
           break
@@ -594,6 +603,18 @@ export class SearchInstance {
       finalRoot = node.root
     }
 
+    // Compute actual cost through the goal polygon
+    const goalPoly = this.mesh.polygons[node.nextPolygon]!
+    const gw = goalPoly.weight
+    const gp = goalPoly.penalty
+    let finalCost: number
+    if (finalRoot === node.root) {
+      finalCost = node.g + distance(root, this.goal) * gw + gp
+    } else {
+      const corner: Point = this.mesh.vertices[finalRoot]!.p
+      finalCost = node.g + distance(root, corner) * gw + gp + distance(corner, this.goal) * gw
+    }
+
     return {
       parent: node,
       root: finalRoot,
@@ -602,8 +623,8 @@ export class SearchInstance {
       leftVertex: -1,
       rightVertex: -1,
       nextPolygon: this.endPolygon,
-      f: node.f,
-      g: node.g,
+      f: finalCost,
+      g: finalCost,
     }
   }
 
@@ -799,16 +820,16 @@ export class SearchInstance {
     this.endPolygon = savedEndPolygon
     this.goalless = false
 
-    // Collect corners where g ≈ Euclidean distance → directly visible
+    // Collect all recorded corners — in weighted meshes g can exceed
+    // Euclidean distance, so always include recorded corners (the goalless
+    // expansion structure already ensures only directly-visible corners are recorded).
     const result = new Map<number, number>()
     for (let i = 0; i < this.mesh.vertices.length; i++) {
       if (this.rootSearchIds[i] !== this.searchId) continue
       const v = this.mesh.vertices[i]!
       if (!v.isCorner) continue
       const g = this.rootGValues[i]!
-      if (g <= distance(from, v.p) + EPSILON * 100) {
-        result.set(i, g)
-      }
+      result.set(i, g)
     }
 
     // Post-process: corners in adjacent polygons are always directly visible

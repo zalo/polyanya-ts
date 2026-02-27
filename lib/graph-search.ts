@@ -140,7 +140,8 @@ export function graphSearch(
     for (const adj of poly.polygons) {
       if (adj === -1 || seen.has(adj)) continue
       seen.add(adj)
-      const ng = cur.g + distance(centroids[cur.poly]!, centroids[adj]!)
+      const adjPoly = mesh.polygons[adj]!
+      const ng = cur.g + distance(centroids[cur.poly]!, centroids[adj]!) * adjPoly.weight + adjPoly.penalty
       if (ng < gBest[adj]!) {
         gBest[adj] = ng
         cameFrom[adj] = cur.poly

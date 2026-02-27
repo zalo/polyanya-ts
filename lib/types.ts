@@ -30,6 +30,17 @@ export interface Polygon {
   maxX: number
   minY: number
   maxY: number
+  /** Distance cost multiplier (default 1.0) */
+  weight: number
+  /** Additive entry cost (default 0.0) */
+  penalty: number
+}
+
+/** A weighted region that the pathfinder prefers to avoid but can traverse */
+export interface WeightedRegion {
+  polygon: Point[]
+  weight: number
+  penalty: number
 }
 
 /** Result of testing whether a polygon contains a point */

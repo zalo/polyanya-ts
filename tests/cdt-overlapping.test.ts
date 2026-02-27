@@ -25,7 +25,7 @@ describe("cdtTriangulate with overlapping obstacles", () => {
       octagon(-3, 0, 8),
       octagon(3, 0, 8),
     ]
-    const regions = cdtTriangulate({ bounds, obstacles })
+    const { regions } = cdtTriangulate({ bounds, obstacles })
     // Previously this produced 0 regions due to crossing constraint edges
     expect(regions.length).toBeGreaterThan(0)
   })
@@ -35,7 +35,7 @@ describe("cdtTriangulate with overlapping obstacles", () => {
       octagon(-3, 0, 8),
       octagon(3, 0, 8),
     ]
-    const regions = cdtTriangulate({ bounds, obstacles })
+    const { regions } = cdtTriangulate({ bounds, obstacles })
     expect(regions.length).toBeGreaterThan(0)
 
     const mesh = buildMeshFromRegions({ regions })
@@ -54,7 +54,7 @@ describe("cdtTriangulate with overlapping obstacles", () => {
       octagon(0, 0, 10), // large
       octagon(0, 0, 3),  // fully inside
     ]
-    const regions = cdtTriangulate({ bounds, obstacles })
+    const { regions } = cdtTriangulate({ bounds, obstacles })
     expect(regions.length).toBeGreaterThan(0)
 
     // No region centroid should be inside the large obstacle
@@ -78,7 +78,7 @@ describe("cdtTriangulate with overlapping obstacles", () => {
       octagon(-25, 0, 5),
       octagon(25, 0, 5),
     ]
-    const regions = cdtTriangulate({ bounds, obstacles })
+    const { regions } = cdtTriangulate({ bounds, obstacles })
     expect(regions.length).toBeGreaterThan(0)
 
     const mesh = buildMeshFromRegions({ regions })
@@ -93,7 +93,7 @@ describe("cdtTriangulate with overlapping obstacles", () => {
       octagon(0, 0, 6),
       octagon(6, 0, 6),
     ]
-    const regions = cdtTriangulate({ bounds, obstacles })
+    const { regions } = cdtTriangulate({ bounds, obstacles })
     expect(regions.length).toBeGreaterThan(0)
 
     const mesh = buildMeshFromRegions({ regions })

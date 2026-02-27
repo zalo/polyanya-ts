@@ -15,6 +15,7 @@ export {
   type StepEvent,
   type Successor,
   type Vertex,
+  type WeightedRegion,
 } from "./types.ts"
 
 // Geometry utilities
@@ -48,7 +49,7 @@ export { SearchInstance } from "./search.ts"
 export { buildMeshFromRegions, type MeshBuilderInput } from "./mesh-builder.ts"
 
 // CDT builder (obstacle → triangulation → regions)
-export { cdtTriangulate, rectToPolygon } from "./cdt-builder.ts"
+export { cdtTriangulate, rectToPolygon, type CdtResult } from "./cdt-builder.ts"
 
 // Constraint crossing resolution (for overlapping obstacles)
 export { resolveConstraintCrossings } from "./resolve-constraint-crossings.ts"

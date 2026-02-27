@@ -224,10 +224,14 @@ export class VisibilityGraph {
 
     // Check direct start→goal visibility via Polyanya search
     this.si.setStartGoal(start, goal)
-    const directDist = distance(start, goal)
-    if (this.si.search() && this.si.getCost() <= directDist + EPSILON * 100) {
-      startAdj.push({ to: goalIdx, dist: directDist })
-      goalAdj.push({ to: startIdx, dist: directDist })
+    if (this.si.search()) {
+      // Use path-length check: if path is 2 points (start→goal), it's direct
+      const pathPts = this.si.getPathPoints()
+      if (pathPts.length === 2) {
+        const directCost = this.si.getCost()
+        startAdj.push({ to: goalIdx, dist: directCost })
+        goalAdj.push({ to: startIdx, dist: directCost })
+      }
     }
 
     // A* over static corner graph + dynamic start/goal edges

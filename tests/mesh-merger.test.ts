@@ -241,9 +241,9 @@ describe("mergeMesh", () => {
 
     // Run the CDT pipeline: extract obstacles → triangulate → filter by point location → build mesh
     const { bounds, obstacles } = extractObstaclePolylines(fileMesh)
-    let regions = cdtTriangulate({ bounds, obstacles })
+    const cdtResult = cdtTriangulate({ bounds, obstacles })
     // Filter out regions outside the original mesh
-    regions = regions.filter((region) => {
+    const regions = cdtResult.regions.filter((region) => {
       let cx = 0, cy = 0
       for (const p of region) { cx += p.x; cy += p.y }
       cx /= region.length; cy /= region.length

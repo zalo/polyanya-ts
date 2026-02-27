@@ -15,12 +15,16 @@ export function mergeMesh(mesh: Mesh): Mesh {
   const nb: number[][] = new Array(n)
   const dead: boolean[] = new Array(n).fill(false)
   const area: number[] = new Array(n)
+  const weights: number[] = new Array(n)
+  const penalties: number[] = new Array(n)
 
   for (let i = 0; i < n; i++) {
     const p = mesh.polygons[i]!
     verts[i] = p.vertices.slice()
     nb[i] = p.polygons.slice()
     area[i] = polyArea(p.vertices, mesh)
+    weights[i] = p.weight
+    penalties[i] = p.penalty
   }
 
   // Union-find
@@ -100,6 +104,9 @@ export function mergeMesh(mesh: Mesh): Mesh {
     if (yRaw === -1) return false
     const yIdx = resolve(yRaw)
     if (yIdx === -1 || yIdx === xIdx || dead[yIdx]) return false
+
+    // Block merging polygons with different weights
+    if (weights[xIdx] !== weights[yIdx] || penalties[xIdx] !== penalties[yIdx]) return false
 
     const yV = verts[yIdx]!
     const N = xV.length
@@ -342,7 +349,7 @@ export function mergeMesh(mesh: Mesh): Mesh {
     }
   }
 
-  return rebuildMesh(mesh, verts, nb, dead)
+  return rebuildMesh(mesh, verts, nb, dead, weights, penalties)
 }
 
 function polyArea(vertexIndices: number[], mesh: Mesh): number {
@@ -361,6 +368,8 @@ function rebuildMesh(
   verts: number[][],
   neighbors: number[][],
   dead: boolean[],
+  weights: number[],
+  penalties: number[],
 ): Mesh {
   const aliveIndices: number[] = []
   const oldToNew: number[] = new Array(verts.length).fill(-1)
@@ -397,7 +406,7 @@ function rebuildMesh(
       if (adj !== -1) { if (foundTrav) isOneWay = false; else foundTrav = true }
     }
 
-    return { vertices: polyVerts, polygons: polyNeigh, isOneWay, minX, maxX, minY, maxY }
+    return { vertices: polyVerts, polygons: polyNeigh, isOneWay, minX, maxX, minY, maxY, weight: weights[oldIdx]!, penalty: penalties[oldIdx]! }
   })
 
   const vertexPolygons: number[][] = new Array(sortedUsedVerts.length)
