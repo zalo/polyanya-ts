@@ -617,12 +617,11 @@ export default function PolyanyaDemo() {
     exitStepMode()
   }, [selectedId])
 
-  // --- rebuild visibility graph when mesh changes ---
+  // --- rebuild visibility graph when mesh changes (lazy — no adjacency built yet) ---
   useEffect(() => {
-    if (!mesh) { visGraphRef.current = null; return }
-    const vg = new VisibilityGraph(mesh)
-    visGraphRef.current = vg
-    setVgTimeMs(vg.buildTimeMs)
+    if (!mesh) { visGraphRef.current = null; setVgTimeMs(0); return }
+    visGraphRef.current = new VisibilityGraph(mesh)
+    setVgTimeMs(0)
   }, [mesh])
 
   // --- compute path whenever mesh/start/goal/algorithm change (not during drag) ---
@@ -639,7 +638,9 @@ export default function PolyanyaDemo() {
     setLivePath(path)
     setLiveStats(stats)
     setLiveVisEdges(visEdges ?? [])
-  }, [mesh, start, goal, buildTimeMs, searchAlgorithm])
+    // Update VG build time now that the graph may have been built lazily
+    setVgTimeMs(visGraphRef.current?.buildTimeMs ?? 0)
+  }, [mesh, start, goal, searchAlgorithm])
 
   useEffect(() => {
     logEndRef.current?.scrollIntoView({ behavior: "smooth" })
@@ -922,6 +923,7 @@ export default function PolyanyaDemo() {
               setLiveStats(stats)
               setLivePath(path)
               setLiveVisEdges(visEdges ?? [])
+              setVgTimeMs(visGraphRef.current?.buildTimeMs ?? 0)
             }
           })
         }

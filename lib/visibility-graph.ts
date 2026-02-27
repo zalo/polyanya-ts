@@ -15,9 +15,12 @@ export interface VisibilityGraphResult {
 }
 
 /**
- * Precomputed visibility graph for a navigation mesh.
+ * Visibility graph for a navigation mesh.
  *
- * Build once per mesh, then call search() for each start/goal query.
+ * Construction is cheap — only convex (reflex) corners are extracted.
+ * The expensive corner-corner adjacency is built lazily on the first search()
+ * call so that switching to this algorithm incurs no upfront cost.
+ *
  * Only convex (reflex) corners are included — vertices where the obstacle
  * subtends < 180°, i.e. where a shortest path might wrap around.
  * Near-flat corners are filtered by `convexityThreshold` (minimum |sin| of
@@ -34,18 +37,17 @@ export class VisibilityGraph {
   private readonly cornerPoints: Point[]
   /** Maps mesh vertex index → index in cornerIndices/cornerPoints */
   private readonly vertexToCorner: Map<number, number>
-  /** Static corner-corner adjacency (indices into cornerPoints) */
-  private readonly adj: { to: number; dist: number }[][]
+  /** Static corner-corner adjacency — null until first search() call */
+  private adj: { to: number; dist: number }[][] | null = null
 
-  /** Time taken to precompute the static graph (ms) */
-  readonly buildTimeMs: number
-  /** Number of static corner-corner edges */
-  readonly edgeCount: number
-  /** Static corner-corner edges for visualization */
-  readonly edges: { ax: number; ay: number; bx: number; by: number }[]
+  /** Time taken to build the static adjacency graph (ms). 0 until first search(). */
+  buildTimeMs = 0
+  /** Number of static corner-corner edges. 0 until first search(). */
+  edgeCount = 0
+  /** Static corner-corner edges for visualization. Empty until first search(). */
+  edges: { ax: number; ay: number; bx: number; by: number }[] = []
 
   constructor(mesh: Mesh, convexityThreshold = 0.02) {
-    const t0 = performance.now()
     this.mesh = mesh
     this.si = new SearchInstance(mesh)
 
@@ -121,11 +123,21 @@ export class VisibilityGraph {
     }
     this.cornerPoints = cornerPoints
     this.vertexToCorner = vertexToCorner
+  }
 
-    // 3. Build static corner-corner adjacency using goalless Polyanya expansion.
+  /**
+   * Build the static corner-corner adjacency graph.
+   * Called lazily on the first search() invocation.
+   */
+  private _build(): void {
+    if (this.adj !== null) return
+    const t0 = performance.now()
+    const numCorners = this.cornerIndices.length
+    const { cornerPoints, vertexToCorner } = this
+
+    // Build static corner-corner adjacency using goalless Polyanya expansion.
     // For each corner c_k, expand from c_k to find all directly-visible corners.
     // A corner v is directly visible iff its Polyanya g-value ≈ distance(c_k, v).
-    // This replaces BVH + K-nearest: no cutoff, no false negatives.
     const adj: { to: number; dist: number }[][] = new Array(numCorners)
     for (let k = 0; k < numCorners; k++) adj[k] = []
 
@@ -162,6 +174,7 @@ export class VisibilityGraph {
    * checks direct start→goal visibility, then runs A*.
    */
   search(start: Point, goal: Point): VisibilityGraphResult {
+    this._build()
     const t0 = performance.now()
     const empty: VisibilityGraphResult = {
       path: [],
@@ -296,7 +309,7 @@ export class VisibilityGraph {
         for (const e of goalAdj) relax(e.to, cur.g + e.dist)
       } else {
         // Corner node: static edges + dynamic backlinks to start/goal
-        for (const e of this.adj[cur.node]!) relax(e.to, cur.g + e.dist)
+        for (const e of this.adj![cur.node]!) relax(e.to, cur.g + e.dist)
         const toStart = cornerToStartDist[cur.node]!
         if (toStart >= 0) relax(startIdx, cur.g + toStart)
         const toGoal = cornerToGoalDist[cur.node]!
