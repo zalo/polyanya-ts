@@ -50,6 +50,9 @@ export { buildMeshFromRegions, type MeshBuilderInput } from "./mesh-builder.ts"
 // CDT builder (obstacle → triangulation → regions)
 export { cdtTriangulate, rectToPolygon } from "./cdt-builder.ts"
 
+// Constraint crossing resolution (for overlapping obstacles)
+export { resolveConstraintCrossings } from "./resolve-constraint-crossings.ts"
+
 // Mesh merger (Polyanya meshmerger algorithm)
 export { mergeMesh } from "./mesh-merger.ts"
 

@@ -1,4 +1,5 @@
 import cdt2d from "cdt2d"
+import { resolveConstraintCrossings } from "./resolve-constraint-crossings.ts"
 import type { Point } from "./types.ts"
 
 /**
@@ -22,8 +23,10 @@ export function cdtTriangulate(input: {
 
   const pts: [number, number][] = []
   const edges: [number, number][] = []
+  const ringBoundaries: number[] = []
 
   // --- Bounds ring (4 corners + samples along edges) ---
+  ringBoundaries.push(edges.length)
   const edgeSamples = 10
   const boundsStart = pts.length
   pts.push([minX, minY], [maxX, minY], [maxX, maxY], [minX, maxY])
@@ -67,6 +70,7 @@ export function cdtTriangulate(input: {
   // --- Obstacle polygon rings ---
   for (const obstacle of obstacles) {
     if (obstacle.length < 3) continue
+    ringBoundaries.push(edges.length)
     const ringStart = pts.length
     // Add tiny jitter to prevent degenerate collinear inputs
     for (let i = 0; i < obstacle.length; i++) {
@@ -82,22 +86,26 @@ export function cdtTriangulate(input: {
     }
   }
 
+  // --- Resolve crossing constraint edges from overlapping obstacles ---
+  const resolved = resolveConstraintCrossings(pts, edges, ringBoundaries)
+
   // --- Run CDT ---
-  const triangles: [number, number, number][] = cdt2d(pts, edges, { exterior: false })
+  const triangles: [number, number, number][] = cdt2d(resolved.pts, resolved.constraintEdges, { exterior: false })
 
   // --- Filter: remove triangles whose centroid is inside any obstacle ---
+  const rPts = resolved.pts
   const filtered = triangles.filter((tri) => {
     const [a, b, c] = tri
-    const cx = (pts[a]![0] + pts[b]![0] + pts[c]![0]) / 3
-    const cy = (pts[a]![1] + pts[b]![1] + pts[c]![1]) / 3
+    const cx = (rPts[a]![0] + rPts[b]![0] + rPts[c]![0]) / 3
+    const cy = (rPts[a]![1] + rPts[b]![1] + rPts[c]![1]) / 3
     return !pointInAnyObstacle(cx, cy, obstacles)
   })
 
   // --- Convert to Point[][] regions ---
   return filtered.map(([a, b, c]) => {
-    const pa = { x: pts[a]![0], y: pts[a]![1] }
-    const pb = { x: pts[b]![0], y: pts[b]![1] }
-    const pc = { x: pts[c]![0], y: pts[c]![1] }
+    const pa = { x: rPts[a]![0], y: rPts[a]![1] }
+    const pb = { x: rPts[b]![0], y: rPts[b]![1] }
+    const pc = { x: rPts[c]![0], y: rPts[c]![1] }
     // Ensure CCW winding
     const cross = (pb.x - pa.x) * (pc.y - pa.y) - (pb.y - pa.y) * (pc.x - pa.x)
     return cross >= 0 ? [pa, pb, pc] : [pa, pc, pb]

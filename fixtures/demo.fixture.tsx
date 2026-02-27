@@ -610,7 +610,10 @@ export default function PolyanyaDemo() {
 
   // --- rebuild visibility graph when mesh changes ---
   useEffect(() => {
-    visGraphRef.current = mesh ? new VisibilityGraph(mesh) : null
+    if (!mesh) { visGraphRef.current = null; return }
+    const vg = new VisibilityGraph(mesh)
+    visGraphRef.current = vg
+    setBuildTimeMs(prev => prev + vg.buildTimeMs)
   }, [mesh])
 
   // --- compute path whenever mesh/start/goal/algorithm change (not during drag) ---
@@ -896,7 +899,7 @@ export default function PolyanyaDemo() {
             const curStart = liveStart.current
             const curGoal = liveGoal.current
             if (mesh) {
-              const { path } = runSearch(
+              const { path, stats, visEdges } = runSearch(
                 mesh,
                 curStart,
                 curGoal,
@@ -907,6 +910,9 @@ export default function PolyanyaDemo() {
               r.setPath(path)
               r.setMarkers(curStart, curGoal)
               r.render()
+              setLiveStats(stats)
+              setLivePath(path)
+              setLiveVisEdges(visEdges ?? [])
             }
           })
         }
