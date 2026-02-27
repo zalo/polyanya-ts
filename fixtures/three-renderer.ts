@@ -449,11 +449,9 @@ export function createThreeRenderer(): ThreeRenderer {
 
     // Offset to prevent z-fighting with obstacles
     const interior = makeSegments(interiorPos, interiorEdgeMat)
-    interior.position.z = -1.0; 
-    if (interior) staticGroup.add(interior)
+    if (interior) { interior.position.z = -1.0; staticGroup.add(interior) }
     const boundary = makeSegments(boundaryPos, boundaryEdgeMat)
-    boundary.position.z = -0.5; 
-    if (boundary) staticGroup.add(boundary)
+    if (boundary) { boundary.position.z = -0.5; staticGroup.add(boundary) }
 
     updateCamera(bounds)
     updateLineWidths()
