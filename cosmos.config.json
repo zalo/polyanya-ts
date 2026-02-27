@@ -1,8 +1,6 @@
 {
   "plugins": ["react-cosmos-plugin-vite"],
   "fixturesDir": "fixtures",
-  "port": 8787,
-  "hostname": "10.0.0.76",
   "ui": {
     "router": {
       "initialFixtureId": {
