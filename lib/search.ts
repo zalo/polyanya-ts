@@ -199,10 +199,10 @@ export class SearchInstance {
             }
           }
           if (succ.type === SuccessorType.RIGHT_NON_OBSERVABLE) {
-            if (rightG === -1) rightG = parent.g + parent.gAdjust + distance(pRoot, parent.right) * polyWeight + polyPenalty
+            if (rightG === -1) rightG = parent.g + parent.gAdjust + distance(pRoot, parent.right) + polyPenalty
             recordCorner(parent.rightVertex, rightG)
           } else {
-            if (leftG === -1) leftG = parent.g + parent.gAdjust + distance(pRoot, parent.left) * polyWeight + polyPenalty
+            if (leftG === -1) leftG = parent.g + parent.gAdjust + distance(pRoot, parent.left) + polyPenalty
             recordCorner(parent.leftVertex, leftG)
           }
         }
@@ -267,13 +267,17 @@ export class SearchInstance {
       switch (succ.type) {
         case SuccessorType.RIGHT_NON_OBSERVABLE:
           if (rightG === -1) {
-            rightG = parent.g + parent.gAdjust + distance(parentRoot, parent.right) * polyWeight + polyPenalty
+            // gAdjust already has the extra weighted cost from OBSERVABLE traversals.
+            // distance(root, corner) is the Euclidean distance — combined with gAdjust
+            // this gives the correct weighted path cost: g + D + sum((w_i-1)*d_i).
+            rightG = parent.g + parent.gAdjust + distance(parentRoot, parent.right) + polyPenalty
           }
           pushNode(parent.rightVertex, rightG, 0)
           break
 
         case SuccessorType.OBSERVABLE: {
-          // Accumulate weighted traverse cost in gAdjust
+          // Accumulate extra weighted cost (weight-1)*traverseDist in gAdjust.
+          // This defers cost to avoid breaking root-level pruning on g.
           let adj = parent.gAdjust
           if (polyWeight !== 1 || polyPenalty !== 0) {
             const midParent = { x: (parent.left.x + parent.right.x) / 2, y: (parent.left.y + parent.right.y) / 2 }
@@ -287,7 +291,7 @@ export class SearchInstance {
 
         case SuccessorType.LEFT_NON_OBSERVABLE:
           if (leftG === -1) {
-            leftG = parent.g + parent.gAdjust + distance(parentRoot, parent.left) * polyWeight + polyPenalty
+            leftG = parent.g + parent.gAdjust + distance(parentRoot, parent.left) + polyPenalty
           }
           pushNode(parent.leftVertex, leftG, 0)
           break
@@ -632,16 +636,26 @@ export class SearchInstance {
       finalRoot = node.root
     }
 
-    // Compute actual cost through the goal polygon, including deferred weighted cost
+    // Compute actual cost including deferred weighted cost (gAdjust).
+    // gAdjust already has the extra (w-1)*d for each OBSERVABLE polygon traversed.
+    // For the goal polygon, estimate extra cost using the interval midpoint as entry.
     const goalPoly = this.mesh.polygons[node.nextPolygon]!
     const gw = goalPoly.weight
     const gp = goalPoly.penalty
     let finalCost: number
     if (finalRoot === node.root) {
-      finalCost = node.g + node.gAdjust + distance(root, this.goal) * gw + gp
+      // Straight line from root through traversed polygons to goal
+      const baseCost = node.g + node.gAdjust + distance(root, this.goal)
+      // Add extra cost for the portion through the goal polygon
+      const entry = { x: (node.left.x + node.right.x) / 2, y: (node.left.y + node.right.y) / 2 }
+      const goalDist = distance(entry, this.goal)
+      finalCost = baseCost + goalDist * (gw - 1) + gp
     } else {
+      // Turn at corner: root → corner → goal
       const corner: Point = this.mesh.vertices[finalRoot]!.p
-      finalCost = node.g + node.gAdjust + distance(root, corner) * gw + gp + distance(corner, this.goal) * gw
+      const baseCost = node.g + node.gAdjust + distance(root, corner) + distance(corner, this.goal)
+      // Corner is on the goal polygon boundary; distance from corner to goal is through goal poly
+      finalCost = baseCost + distance(corner, this.goal) * (gw - 1) + gp
     }
 
     return {
