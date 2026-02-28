@@ -261,14 +261,7 @@ export class SearchInstance {
           break
 
         case SuccessorType.OBSERVABLE:
-          if (polyWeight !== 1 || polyPenalty !== 0) {
-            const midParent = { x: (parent.left.x + parent.right.x) / 2, y: (parent.left.y + parent.right.y) / 2 }
-            const midSucc = { x: (succ.left.x + succ.right.x) / 2, y: (succ.left.y + succ.right.y) / 2 }
-            const traverseDist = distance(midParent, midSucc)
-            pushNode(parent.root, parent.g + traverseDist * (polyWeight - 1.0) + polyPenalty)
-          } else {
-            pushNode(parent.root, parent.g)
-          }
+          pushNode(parent.root, parent.g)
           break
 
         case SuccessorType.LEFT_NON_OBSERVABLE:
