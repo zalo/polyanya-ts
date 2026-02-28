@@ -1,6 +1,7 @@
 import { expect, test, describe } from "bun:test"
 import { cdtTriangulate } from "../lib/cdt-builder.ts"
 import { buildMeshFromRegions } from "../lib/mesh-builder.ts"
+import { mergeMesh } from "../lib/mesh-merger.ts"
 import { SearchInstance } from "../lib/search.ts"
 import { distance } from "../lib/geometry.ts"
 import type { Point, WeightedRegion } from "../lib/types.ts"
@@ -234,5 +235,49 @@ describe("weighted regions", () => {
     expect(search.search()).toBe(true)
     expect(search.getCost()).toBeGreaterThan(0)
     expect(search.getPathPoints().length).toBeGreaterThanOrEqual(2)
+  })
+
+  test("weight=1 penalty=0 is identical to open space", () => {
+    const wr: WeightedRegion = {
+      polygon: [
+        { x: -15, y: -15 },
+        { x: 15, y: -15 },
+        { x: 15, y: 15 },
+        { x: -15, y: 15 },
+      ],
+      weight: 1.0,
+      penalty: 0,
+    }
+
+    // Build with and without the weight=1 region
+    const { regions: rNone } = cdtTriangulate({ bounds, obstacles: [] })
+    const meshNone = buildMeshFromRegions({ regions: rNone })
+
+    const { regions: rW1, regionWeights: rwW1 } = cdtTriangulate({ bounds, obstacles: [], weightedRegions: [wr] })
+    const meshW1 = buildMeshFromRegions({ regions: rW1, regionWeights: rwW1 })
+
+    // Same number of triangles (no extra Steiner points added)
+    expect(rW1.length).toBe(rNone.length)
+
+    // Same merge result
+    expect(mergeMesh(meshW1).polygons.length).toBe(mergeMesh(meshNone).polygons.length)
+
+    // Same path costs across multiple queries
+    const queries = [
+      { s: { x: -20, y: 0 }, g: { x: 20, y: 0 } },
+      { s: { x: -30, y: -30 }, g: { x: 30, y: 30 } },
+      { s: { x: 0, y: 0 }, g: { x: 40, y: 0 } },
+    ]
+    for (const q of queries) {
+      const sNone = new SearchInstance(meshNone)
+      sNone.setStartGoal(q.s, q.g)
+      sNone.search()
+
+      const sW1 = new SearchInstance(meshW1)
+      sW1.setStartGoal(q.s, q.g)
+      sW1.search()
+
+      expect(sW1.getCost()).toBeCloseTo(sNone.getCost(), 6)
+    }
   })
 })

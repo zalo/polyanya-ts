@@ -97,7 +97,7 @@ export function cdtTriangulate(input: {
   // --- Weighted region vertices (added as Steiner points, NOT constraint edges) ---
   // Adding only vertices ensures the CDT refines triangles near region boundaries
   // without creating holes (closed constraint rings would be treated as holes by cdt2d).
-  const wrPolygons = weightedRegions ?? []
+  const wrPolygons = (weightedRegions ?? []).filter(wr => wr.weight !== 1 || wr.penalty !== 0)
   for (const wr of wrPolygons) {
     if (wr.polygon.length < 3) continue
     for (let i = 0; i < wr.polygon.length; i++) {
