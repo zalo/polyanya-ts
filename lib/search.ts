@@ -109,6 +109,7 @@ export class SearchInstance {
   private rootGValues: number[] = []
   private rootSearchIds: number[] = []
   private searchId = 0
+  private expandedSet = new Set<number>()
 
   // Statistics
   nodesGenerated = 0
@@ -198,10 +199,10 @@ export class SearchInstance {
             }
           }
           if (succ.type === SuccessorType.RIGHT_NON_OBSERVABLE) {
-            if (rightG === -1) rightG = parent.g + distance(pRoot, parent.right) * polyWeight + polyPenalty
+            if (rightG === -1) rightG = parent.g + parent.gAdjust + distance(pRoot, parent.right) * polyWeight + polyPenalty
             recordCorner(parent.rightVertex, rightG)
           } else {
-            if (leftG === -1) leftG = parent.g + distance(pRoot, parent.left) * polyWeight + polyPenalty
+            if (leftG === -1) leftG = parent.g + parent.gAdjust + distance(pRoot, parent.left) * polyWeight + polyPenalty
             recordCorner(parent.leftVertex, leftG)
           }
         }
@@ -226,16 +227,17 @@ export class SearchInstance {
           ? this.start
           : this.mesh.vertices[parent.root]!.p
 
-      const pushNode = (root: number, g: number) => {
+      const pushNode = (root: number, g: number, adj: number = 0) => {
+        const effectiveG = g + adj
         if (root !== -1) {
           if (this.rootSearchIds[root] !== this.searchId) {
             this.rootSearchIds[root] = this.searchId
-            this.rootGValues[root] = g
+            this.rootGValues[root] = effectiveG
           } else {
-            if (this.rootGValues[root]! + EPSILON < g) {
+            if (this.rootGValues[root]! + EPSILON < effectiveG) {
               return // pruned
             }
-            this.rootGValues[root] = g
+            this.rootGValues[root] = effectiveG
           }
         }
 
@@ -247,28 +249,47 @@ export class SearchInstance {
           leftVertex,
           rightVertex,
           nextPolygon,
-          f: g,
+          f: g + adj,
           g,
+          gAdjust: adj,
         })
       }
+
+      // Compute the extra weighted cost for traversing through this polygon.
+      // In standard Polyanya, OBSERVABLE successors carry parent.g unchanged and
+      // distance is deferred until a turn (NON_OBSERVABLE) or goal. For weighted
+      // polygons, we accumulate the extra cost (weight - 1) * traverseDist in
+      // gAdjust. This avoids breaking root-level pruning (which uses g).
+      const nextPoly = this.mesh.polygons[nextPolygon]
+      const nextWeight = nextPoly ? nextPoly.weight : 1
+      const nextPenalty = nextPoly ? nextPoly.penalty : 0
 
       switch (succ.type) {
         case SuccessorType.RIGHT_NON_OBSERVABLE:
           if (rightG === -1) {
-            rightG = parent.g + distance(parentRoot, parent.right) * polyWeight + polyPenalty
+            rightG = parent.g + parent.gAdjust + distance(parentRoot, parent.right) * polyWeight + polyPenalty
           }
-          pushNode(parent.rightVertex, rightG)
+          pushNode(parent.rightVertex, rightG, 0)
           break
 
-        case SuccessorType.OBSERVABLE:
-          pushNode(parent.root, parent.g)
+        case SuccessorType.OBSERVABLE: {
+          // Accumulate weighted traverse cost in gAdjust
+          let adj = parent.gAdjust
+          if (polyWeight !== 1 || polyPenalty !== 0) {
+            const midParent = { x: (parent.left.x + parent.right.x) / 2, y: (parent.left.y + parent.right.y) / 2 }
+            const midSucc = { x: (succ.left.x + succ.right.x) / 2, y: (succ.left.y + succ.right.y) / 2 }
+            const traverseDist = distance(midParent, midSucc)
+            adj += traverseDist * (polyWeight - 1.0) + polyPenalty
+          }
+          pushNode(parent.root, parent.g, adj)
           break
+        }
 
         case SuccessorType.LEFT_NON_OBSERVABLE:
           if (leftG === -1) {
-            leftG = parent.g + distance(parentRoot, parent.left) * polyWeight + polyPenalty
+            leftG = parent.g + parent.gAdjust + distance(parentRoot, parent.left) * polyWeight + polyPenalty
           }
-          pushNode(parent.leftVertex, leftG)
+          pushNode(parent.leftVertex, leftG, 0)
           break
       }
     }
@@ -295,6 +316,7 @@ export class SearchInstance {
       nextPolygon: nextPoly,
       f: h,
       g: 0,
+      gAdjust: 0,
     })
 
     const pushLazy = (lazy: SearchNode) => {
@@ -431,6 +453,7 @@ export class SearchInstance {
     this.nodesPrunedPostPop = 0
     this.successorCalls = 0
     this.stepEvents = []
+    this.expandedSet.clear()
     this.setEndPolygon()
     this.startPolygon = this.resolvePointLocation(this.start).poly1
 
@@ -548,20 +571,33 @@ export class SearchInstance {
       return this.stepEvents
     }
 
-    // Root-level pruning
+    // Root-level pruning (uses effective g = g + gAdjust)
     if (node.root !== -1) {
       if (this.rootSearchIds[node.root] === this.searchId) {
-        if (this.rootGValues[node.root]! + EPSILON < node.g) {
+        if (this.rootGValues[node.root]! + EPSILON < node.g + node.gAdjust) {
           this.nodesPrunedPostPop++
           this.stepEvents.push({
             type: StepEventType.NODE_PRUNED,
             node: { ...node },
-            message: `Pruned: root ${node.root} already reached with better g (${this.rootGValues[node.root]!.toFixed(4)} < ${node.g.toFixed(4)})`,
+            message: `Pruned: root ${node.root} already reached with better g (${this.rootGValues[node.root]!.toFixed(4)} < ${(node.g + node.gAdjust).toFixed(4)})`,
           })
           return this.stepEvents
         }
       }
     }
+
+    // Prevent re-expansion of the same (root, polygon) pair
+    const expandKey = (node.root + 1) * this.mesh.polygons.length + node.nextPolygon
+    if (this.expandedSet.has(expandKey)) {
+      this.nodesPrunedPostPop++
+      this.stepEvents.push({
+        type: StepEventType.NODE_PRUNED,
+        node: { ...node },
+        message: `Pruned: (root=${node.root}, poly=${node.nextPolygon}) already expanded`,
+      })
+      return this.stepEvents
+    }
+    this.expandedSet.add(expandKey)
 
     // Expand the node
     this.expandAndPush(node)
@@ -596,16 +632,16 @@ export class SearchInstance {
       finalRoot = node.root
     }
 
-    // Compute actual cost through the goal polygon
+    // Compute actual cost through the goal polygon, including deferred weighted cost
     const goalPoly = this.mesh.polygons[node.nextPolygon]!
     const gw = goalPoly.weight
     const gp = goalPoly.penalty
     let finalCost: number
     if (finalRoot === node.root) {
-      finalCost = node.g + distance(root, this.goal) * gw + gp
+      finalCost = node.g + node.gAdjust + distance(root, this.goal) * gw + gp
     } else {
       const corner: Point = this.mesh.vertices[finalRoot]!.p
-      finalCost = node.g + distance(root, corner) * gw + gp + distance(corner, this.goal) * gw
+      finalCost = node.g + node.gAdjust + distance(root, corner) * gw + gp + distance(corner, this.goal) * gw
     }
 
     return {
@@ -618,6 +654,7 @@ export class SearchInstance {
       nextPolygon: this.endPolygon,
       f: finalCost,
       g: finalCost,
+      gAdjust: 0,
     }
   }
 
@@ -719,15 +756,23 @@ export class SearchInstance {
         return true
       }
 
-      // Root-level pruning
+      // Root-level pruning (uses effective g = g + gAdjust)
       if (node.root !== -1) {
         if (this.rootSearchIds[node.root] === this.searchId) {
-          if (this.rootGValues[node.root]! + EPSILON < node.g) {
+          if (this.rootGValues[node.root]! + EPSILON < node.g + node.gAdjust) {
             this.nodesPrunedPostPop++
             continue
           }
         }
       }
+
+      // Prevent re-expansion of the same (root, polygon) pair
+      const expandKey = (node.root + 1) * this.mesh.polygons.length + node.nextPolygon
+      if (this.expandedSet.has(expandKey)) {
+        this.nodesPrunedPostPop++
+        continue
+      }
+      this.expandedSet.add(expandKey)
 
       this.expandAndPush(node)
     }
@@ -789,6 +834,7 @@ export class SearchInstance {
     this.nodesPrunedPostPop = 0
     this.successorCalls = 0
     this.stepEvents = []
+    this.expandedSet.clear()
 
     this.startPolygon = this.resolvePointLocation(from).poly1
     if (this.startPolygon >= 0) {
