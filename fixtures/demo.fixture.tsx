@@ -634,12 +634,17 @@ export default function PolyanyaDemo() {
     exitStepMode()
   }, [selectedId])
 
-  // --- rebuild visibility graph when mesh changes (lazy — no adjacency built yet) ---
+  // --- rebuild visibility graph when mesh or weighted regions change ---
   useEffect(() => {
     if (!mesh) { visGraphRef.current = null; setVgTimeMs(0); return }
-    visGraphRef.current = new VisibilityGraph(mesh)
+    const weightedRegions = weightedRects.map(wr => ({
+      polygon: rectToPolygon(wr.cx, wr.cy, wr.w, wr.h, 0),
+      weight: wr.weight,
+      penalty: wr.penalty,
+    }))
+    visGraphRef.current = new VisibilityGraph(mesh, { weightedRegions })
     setVgTimeMs(0)
-  }, [mesh])
+  }, [mesh, weightedRects])
 
   // --- compute path whenever mesh/start/goal/algorithm change (not during drag) ---
   useEffect(() => {

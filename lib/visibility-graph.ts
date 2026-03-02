@@ -1,8 +1,18 @@
-import type { Point } from "./types.ts"
+import type { Point, WeightedRegion } from "./types.ts"
 import type { Mesh } from "./mesh.ts"
 import { EPSILON } from "./types.ts"
-import { distance } from "./geometry.ts"
+import { distance, pointsEqual } from "./geometry.ts"
 import { SearchInstance } from "./search.ts"
+import {
+  buildWeightedEdgeContext,
+  computeWeightedEdgeCost,
+  type WeightedEdgeContext,
+} from "./weighted-edges.ts"
+
+export interface VisibilityGraphOptions {
+  convexityThreshold?: number
+  weightedRegions?: WeightedRegion[]
+}
 
 export interface VisibilityGraphResult {
   path: Point[]
@@ -26,6 +36,10 @@ export interface VisibilityGraphResult {
  * Near-flat corners are filtered by `convexityThreshold` (minimum |sin| of
  * the CW turn angle; default 0.02 ≈ 1.1°).
  *
+ * When weighted regions are provided, region polygon vertices become
+ * additional graph nodes (potential turning points around/through regions),
+ * and edge costs are computed via segment-region intersection.
+ *
  * Corner-corner adjacency is computed using goalless Polyanya expansion,
  * which uses mesh topology directly (no BVH, no K-nearest cutoff).
  */
@@ -33,12 +47,18 @@ export class VisibilityGraph {
   private readonly mesh: Mesh
   /** Reused search instance for visibility queries */
   private readonly si: SearchInstance
+  /** Mesh vertex indices for mesh corner nodes */
   private readonly cornerIndices: number[]
+  /** All graph node points (mesh corners + region vertices) */
   private readonly cornerPoints: Point[]
+  /** How many nodes are mesh corners (the rest are region vertices) */
+  private readonly numMeshCorners: number
   /** Maps mesh vertex index → index in cornerIndices/cornerPoints */
   private readonly vertexToCorner: Map<number, number>
   /** Static corner-corner adjacency — null until first search() call */
   private adj: { to: number; dist: number }[][] | null = null
+  private readonly weightedRegions: WeightedRegion[] | null
+  private weightedCtx: WeightedEdgeContext | null = null
 
   /** Time taken to build the static adjacency graph (ms). 0 until first search(). */
   buildTimeMs = 0
@@ -47,9 +67,22 @@ export class VisibilityGraph {
   /** Static corner-corner edges for visualization. Empty until first search(). */
   edges: { ax: number; ay: number; bx: number; by: number }[] = []
 
-  constructor(mesh: Mesh, convexityThreshold = 0.02) {
+  constructor(mesh: Mesh, options?: number | VisibilityGraphOptions) {
+    let convexityThreshold = 0.02
+    let weightedRegions: WeightedRegion[] | null = null
+
+    if (typeof options === "number") {
+      convexityThreshold = options
+    } else if (options) {
+      if (options.convexityThreshold !== undefined)
+        convexityThreshold = options.convexityThreshold
+      if (options.weightedRegions && options.weightedRegions.length > 0)
+        weightedRegions = options.weightedRegions
+    }
+
     this.mesh = mesh
     this.si = new SearchInstance(mesh)
+    this.weightedRegions = weightedRegions
 
     // 1. Track directed boundary edge adjacency for convexity test
     const boundaryNext = new Map<number, number>()
@@ -74,15 +107,10 @@ export class VisibilityGraph {
     }
 
     // 2. Extract convex (reflex) corners only.
-    // A boundary vertex is a valid turning point iff the obstacle it borders
-    // subtends < 180° — equivalently, the directed boundary makes a CW turn
-    // (normalized cross product < 0) at that vertex.
-    // Flat and concave corners never lie on a shortest path.
     const cornerIndices: number[] = []
     for (let i = 0; i < mesh.vertices.length; i++) {
       const v = mesh.vertices[i]!
       if (!v.isCorner) continue
-      // Ambiguous corners (multiple obstacle gaps): keep without convexity test
       if (v.isAmbig) {
         cornerIndices.push(i)
         continue
@@ -90,39 +118,75 @@ export class VisibilityGraph {
       const prevIdx = boundaryPrev.get(i)
       const nextIdx = boundaryNext.get(i)
       if (prevIdx === undefined || nextIdx === undefined) {
-        cornerIndices.push(i) // can't determine, keep
+        cornerIndices.push(i)
         continue
       }
       const A = mesh.vertices[prevIdx]!.p
       const VP = v.p
       const B = mesh.vertices[nextIdx]!.p
-      // Vectors: d1 = A→V, d2 = V→B
       const dx1 = VP.x - A.x, dy1 = VP.y - A.y
       const dx2 = B.x - VP.x, dy2 = B.y - VP.y
       const len1Sq = dx1 * dx1 + dy1 * dy1
       const len2Sq = dx2 * dx2 + dy2 * dy2
       if (len1Sq < EPSILON || len2Sq < EPSILON) {
-        cornerIndices.push(i) // degenerate edge, keep
+        cornerIndices.push(i)
         continue
       }
-      // Normalized cross = sin(turn angle). Negative = CW = reflex vertex.
-      // Filter out near-flat corners (|sin| < threshold).
-      const normalizedCross = (dx1 * dy2 - dy1 * dx2) / Math.sqrt(len1Sq * len2Sq)
+      const normalizedCross =
+        (dx1 * dy2 - dy1 * dx2) / Math.sqrt(len1Sq * len2Sq)
       if (normalizedCross < -convexityThreshold) {
         cornerIndices.push(i)
       }
     }
     this.cornerIndices = cornerIndices
 
-    const numCorners = cornerIndices.length
-    const cornerPoints: Point[] = new Array(numCorners)
+    const numMeshCorners = cornerIndices.length
+    this.numMeshCorners = numMeshCorners
+
+    const cornerPoints: Point[] = new Array(numMeshCorners)
     const vertexToCorner = new Map<number, number>()
-    for (let k = 0; k < numCorners; k++) {
+    for (let k = 0; k < numMeshCorners; k++) {
       cornerPoints[k] = mesh.vertices[cornerIndices[k]!]!.p
       vertexToCorner.set(cornerIndices[k]!, k)
     }
+
+    // 3. Add weighted region polygon vertices as additional graph nodes.
+    // These are potential turning points for paths around/through regions.
+    if (weightedRegions) {
+      for (const wr of weightedRegions) {
+        for (const v of wr.polygon) {
+          const loc = mesh.getPointLocation(v)
+          if (loc.poly1 < 0) continue
+          let isDuplicate = false
+          for (let k = 0; k < cornerPoints.length; k++) {
+            if (pointsEqual(v, cornerPoints[k]!)) {
+              isDuplicate = true
+              break
+            }
+          }
+          if (!isDuplicate) {
+            cornerPoints.push(v)
+          }
+        }
+      }
+    }
+
     this.cornerPoints = cornerPoints
     this.vertexToCorner = vertexToCorner
+  }
+
+  /** Compute edge cost: weighted if context exists, otherwise Euclidean */
+  private edgeCost(a: Point, b: Point): number {
+    return this.weightedCtx
+      ? computeWeightedEdgeCost(a, b, this.weightedCtx)
+      : distance(a, b)
+  }
+
+  /** Check direct visibility between two points via Polyanya search */
+  private isDirectlyVisible(a: Point, b: Point): boolean {
+    this.si.setStartGoal(a, b)
+    if (!this.si.search()) return false
+    return this.si.getPathPoints().length === 2
   }
 
   /**
@@ -132,12 +196,14 @@ export class VisibilityGraph {
   private _build(): void {
     if (this.adj !== null) return
     const t0 = performance.now()
-    const numCorners = this.cornerIndices.length
-    const { cornerPoints, vertexToCorner } = this
+    const { cornerPoints, vertexToCorner, numMeshCorners } = this
+    const numCorners = cornerPoints.length
 
-    // Build static corner-corner adjacency using goalless Polyanya expansion.
-    // For each corner c_k, expand from c_k to find all directly-visible corners.
-    // A corner v is directly visible iff its Polyanya g-value ≈ distance(c_k, v).
+    // Build weighted edge context if needed
+    if (this.weightedRegions) {
+      this.weightedCtx = buildWeightedEdgeContext(this.weightedRegions)
+    }
+
     const adj: { to: number; dist: number }[][] = new Array(numCorners)
     for (let k = 0; k < numCorners; k++) adj[k] = []
 
@@ -145,20 +211,50 @@ export class VisibilityGraph {
     const visEdges: { ax: number; ay: number; bx: number; by: number }[] = []
     const addedEdge = new Set<string>()
 
-    for (let k = 0; k < numCorners; k++) {
+    const addEdge = (k: number, j: number, cost: number) => {
+      const lo = Math.min(k, j)
+      const hi = Math.max(k, j)
+      const key = `${lo},${hi}`
+      if (addedEdge.has(key)) return
+      addedEdge.add(key)
+      adj[k]!.push({ to: j, dist: cost })
+      adj[j]!.push({ to: k, dist: cost })
+      visEdges.push({
+        ax: cornerPoints[k]!.x,
+        ay: cornerPoints[k]!.y,
+        bx: cornerPoints[j]!.x,
+        by: cornerPoints[j]!.y,
+      })
+      edgeCount++
+    }
+
+    // Mesh corners → mesh corners: goalless Polyanya from both sides.
+    // Running from both A and B mitigates directional dependence in the
+    // cone filter — if A's expansion misses B, B's expansion may find A.
+    for (let k = 0; k < numMeshCorners; k++) {
       const visible = this.si.computeVisibleCornersFromPoint(cornerPoints[k]!)
-      for (const [vertexIdx, d] of visible) {
+      for (const [vertexIdx] of visible) {
         const j = vertexToCorner.get(vertexIdx)
-        if (j === undefined || j <= k) continue // add each undirected edge once
-        const edgeKey = `${k},${j}` // k < j guaranteed
-        if (addedEdge.has(edgeKey)) continue
-        addedEdge.add(edgeKey)
-        adj[k]!.push({ to: j, dist: d })
-        adj[j]!.push({ to: k, dist: d })
-        const pi = cornerPoints[k]!
-        const pj = cornerPoints[j]!
-        visEdges.push({ ax: pi.x, ay: pi.y, bx: pj.x, by: pj.y })
-        edgeCount++
+        if (j === undefined || j === k) continue
+        const cost = this.edgeCost(cornerPoints[k]!, cornerPoints[j]!)
+        addEdge(k, j, cost)
+      }
+    }
+
+    // Region vertices → all other corners: direct Polyanya search.
+    // Goalless expansion is unreliable from interior mesh points (region
+    // vertices) and can only discover mesh corners, not other region
+    // vertices. Direct search handles both region↔mesh and region↔region.
+    for (let k = numMeshCorners; k < numCorners; k++) {
+      for (let j = 0; j < numCorners; j++) {
+        if (j === k) continue
+        const lo = Math.min(k, j)
+        const hi = Math.max(k, j)
+        if (addedEdge.has(`${lo},${hi}`)) continue
+        if (this.isDirectlyVisible(cornerPoints[k]!, cornerPoints[j]!)) {
+          const cost = this.edgeCost(cornerPoints[k]!, cornerPoints[j]!)
+          addEdge(k, j, cost)
+        }
       }
     }
 
@@ -190,7 +286,7 @@ export class VisibilityGraph {
     if (startLoc.poly1 < 0 || goalLoc.poly1 < 0) return empty
     if (!this.mesh.sameIsland(startLoc.poly1, goalLoc.poly1)) return empty
 
-    const numCorners = this.cornerIndices.length
+    const numCorners = this.cornerPoints.length
     const startIdx = numCorners
     const goalIdx = numCorners + 1
     const numNodes = numCorners + 2
@@ -200,35 +296,50 @@ export class VisibilityGraph {
     nodePoints[startIdx] = start
     nodePoints[goalIdx] = goal
 
-    // Find corners visible from start and goal via Polyanya expansion
+    // Find mesh corners visible from start and goal via Polyanya expansion
     const startVisibleMap = this.si.computeVisibleCornersFromPoint(start)
-    const goalVisibleMap  = this.si.computeVisibleCornersFromPoint(goal)
+    const goalVisibleMap = this.si.computeVisibleCornersFromPoint(goal)
 
     const cornerToStartDist = new Float64Array(numCorners).fill(-1)
-    const cornerToGoalDist  = new Float64Array(numCorners).fill(-1)
+    const cornerToGoalDist = new Float64Array(numCorners).fill(-1)
     const startAdj: { to: number; dist: number }[] = []
-    const goalAdj:  { to: number; dist: number }[] = []
+    const goalAdj: { to: number; dist: number }[] = []
 
-    for (const [vertexIdx, d] of startVisibleMap) {
+    for (const [vertexIdx] of startVisibleMap) {
       const k = this.vertexToCorner.get(vertexIdx)
       if (k === undefined) continue
-      startAdj.push({ to: k, dist: d })
-      cornerToStartDist[k] = d
+      const cost = this.edgeCost(start, this.cornerPoints[k]!)
+      startAdj.push({ to: k, dist: cost })
+      cornerToStartDist[k] = cost
     }
-    for (const [vertexIdx, d] of goalVisibleMap) {
+    for (const [vertexIdx] of goalVisibleMap) {
       const k = this.vertexToCorner.get(vertexIdx)
       if (k === undefined) continue
-      goalAdj.push({ to: k, dist: d })
-      cornerToGoalDist[k] = d
+      const cost = this.edgeCost(goal, this.cornerPoints[k]!)
+      goalAdj.push({ to: k, dist: cost })
+      cornerToGoalDist[k] = cost
+    }
+
+    // Region vertex connections via Polyanya search + path-length-2 check
+    for (let k = this.numMeshCorners; k < numCorners; k++) {
+      if (this.isDirectlyVisible(start, this.cornerPoints[k]!)) {
+        const cost = this.edgeCost(start, this.cornerPoints[k]!)
+        startAdj.push({ to: k, dist: cost })
+        cornerToStartDist[k] = cost
+      }
+      if (this.isDirectlyVisible(goal, this.cornerPoints[k]!)) {
+        const cost = this.edgeCost(goal, this.cornerPoints[k]!)
+        goalAdj.push({ to: k, dist: cost })
+        cornerToGoalDist[k] = cost
+      }
     }
 
     // Check direct start→goal visibility via Polyanya search
     this.si.setStartGoal(start, goal)
     if (this.si.search()) {
-      // Use path-length check: if path is 2 points (start→goal), it's direct
       const pathPts = this.si.getPathPoints()
       if (pathPts.length === 2) {
-        const directCost = this.si.getCost()
+        const directCost = this.edgeCost(start, goal)
         startAdj.push({ to: goalIdx, dist: directCost })
         goalAdj.push({ to: startIdx, dist: directCost })
       }
@@ -244,7 +355,9 @@ export class VisibilityGraph {
       while (i > 0) {
         const pi = (i - 1) >> 1
         if (heap[pi]!.f <= heap[i]!.f) break
-        const tmp = heap[pi]!; heap[pi] = heap[i]!; heap[i] = tmp
+        const tmp = heap[pi]!
+        heap[pi] = heap[i]!
+        heap[i] = tmp
         i = pi
       }
     }
@@ -256,11 +369,14 @@ export class VisibilityGraph {
         let i = 0
         while (true) {
           let s = i
-          const l = 2 * i + 1, r = 2 * i + 2
+          const l = 2 * i + 1,
+            r = 2 * i + 2
           if (l < heap.length && heap[l]!.f < heap[s]!.f) s = l
           if (r < heap.length && heap[r]!.f < heap[s]!.f) s = r
           if (s === i) break
-          const tmp = heap[i]!; heap[i] = heap[s]!; heap[s] = tmp
+          const tmp = heap[i]!
+          heap[i] = heap[s]!
+          heap[s] = tmp
           i = s
         }
       }

@@ -112,8 +112,6 @@ export interface SearchNode {
   f: number
   /** g = cost from start to this node's root */
   g: number
-  /** Accumulated extra cost from traversing weighted polygons (deferred until a turn or goal) */
-  gAdjust: number
 }
 
 /** Orientation of three points */

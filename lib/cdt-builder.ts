@@ -97,7 +97,11 @@ export function cdtTriangulate(input: {
   // --- Weighted region vertices (added as Steiner points, NOT constraint edges) ---
   // Adding only vertices ensures the CDT refines triangles near region boundaries
   // without creating holes (closed constraint rings would be treated as holes by cdt2d).
-  const wrPolygons = (weightedRegions ?? []).filter(wr => wr.weight !== 1 || wr.penalty !== 0)
+  // First, merge overlapping weighted regions that share the same weight+penalty
+  // to reduce Steiner point count and avoid near-degenerate triangulations.
+  const wrPolygons = mergeWeightedRegions(
+    (weightedRegions ?? []).filter(wr => wr.weight !== 1 || wr.penalty !== 0)
+  )
   for (const wr of wrPolygons) {
     if (wr.polygon.length < 3) continue
     for (let i = 0; i < wr.polygon.length; i++) {
@@ -170,6 +174,81 @@ function pointInAnyObstacle(px: number, py: number, obstacles: Point[][]): boole
     if (pointInPolygon(px, py, obstacle)) return true
   }
   return false
+}
+
+/**
+ * Merge overlapping weighted regions that share the same weight+penalty.
+ * Computes axis-aligned bounding box for each polygon, then iteratively
+ * merges overlapping/touching AABBs with matching weight+penalty into a
+ * single rect polygon. This reduces Steiner point count and prevents
+ * near-degenerate triangulations from many tiny overlapping squares.
+ */
+function mergeWeightedRegions(regions: WeightedRegion[]): WeightedRegion[] {
+  if (regions.length <= 1) return regions
+
+  // Group by weight+penalty key
+  const groups = new Map<string, { minX: number; minY: number; maxX: number; maxY: number; weight: number; penalty: number }[]>()
+  for (const wr of regions) {
+    const key = `${wr.weight}:${wr.penalty}`
+    let group = groups.get(key)
+    if (!group) {
+      group = []
+      groups.set(key, group)
+    }
+    // Compute AABB from polygon
+    let rMinX = Infinity, rMinY = Infinity, rMaxX = -Infinity, rMaxY = -Infinity
+    for (const p of wr.polygon) {
+      if (p.x < rMinX) rMinX = p.x
+      if (p.y < rMinY) rMinY = p.y
+      if (p.x > rMaxX) rMaxX = p.x
+      if (p.y > rMaxY) rMaxY = p.y
+    }
+    group.push({ minX: rMinX, minY: rMinY, maxX: rMaxX, maxY: rMaxY, weight: wr.weight, penalty: wr.penalty })
+  }
+
+  const result: WeightedRegion[] = []
+
+  for (const [, rects] of groups) {
+    // Iteratively merge overlapping/touching rects
+    let merged = true
+    while (merged) {
+      merged = false
+      for (let i = 0; i < rects.length; i++) {
+        for (let j = i + 1; j < rects.length; j++) {
+          const a = rects[i]!, b = rects[j]!
+          // Check overlap/touching (with tiny epsilon for floating point)
+          if (a.maxX + 1e-6 >= b.minX && b.maxX + 1e-6 >= a.minX &&
+              a.maxY + 1e-6 >= b.minY && b.maxY + 1e-6 >= a.minY) {
+            // Merge into a
+            a.minX = Math.min(a.minX, b.minX)
+            a.minY = Math.min(a.minY, b.minY)
+            a.maxX = Math.max(a.maxX, b.maxX)
+            a.maxY = Math.max(a.maxY, b.maxY)
+            rects.splice(j, 1)
+            merged = true
+            break
+          }
+        }
+        if (merged) break
+      }
+    }
+
+    // Convert merged rects back to WeightedRegion polygons
+    for (const r of rects) {
+      result.push({
+        polygon: [
+          { x: r.minX, y: r.minY },
+          { x: r.maxX, y: r.minY },
+          { x: r.maxX, y: r.maxY },
+          { x: r.minX, y: r.maxY },
+        ],
+        weight: r.weight,
+        penalty: r.penalty,
+      })
+    }
+  }
+
+  return result
 }
 
 /**

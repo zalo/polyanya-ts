@@ -64,5 +64,14 @@ export { graphSearch, type GraphSearchResult } from "./graph-search.ts"
 export {
   VisibilityGraph,
   visibilityGraphSearch,
+  type VisibilityGraphOptions,
   type VisibilityGraphResult,
 } from "./visibility-graph.ts"
+
+// Weighted edge cost computation
+export {
+  buildWeightedEdgeContext,
+  computeWeightedEdgeCost,
+  pointInConvexPolygon,
+  type WeightedEdgeContext,
+} from "./weighted-edges.ts"
