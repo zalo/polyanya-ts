@@ -68,6 +68,9 @@ export {
   type VisibilityGraphResult,
 } from "./visibility-graph.ts"
 
+// Polygon merging (boolean union of overlapping obstacles)
+export { mergeAllPolygons } from "./merge-polygons.ts"
+
 // Weighted edge cost computation
 export {
   buildWeightedEdgeContext,
