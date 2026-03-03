@@ -1,4 +1,6 @@
 node_modules/
-dist/
+dist/assets/
+dist/index.html
+dist/meshes/
 cosmos-export/
 *.tsbuildinfo
