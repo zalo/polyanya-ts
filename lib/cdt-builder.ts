@@ -78,19 +78,40 @@ export function cdtTriangulate(input: {
   // --- Obstacle polygon rings ---
   for (const obstacle of obstacles) {
     if (obstacle.length < 3) continue
+
+    // Deduplicate consecutive coincident points (including wrap-around)
+    // to avoid zero-length constraint edges that crash cdt2d.
+    const deduped: Point[] = []
+    for (let i = 0; i < obstacle.length; i++) {
+      const p = obstacle[i]!
+      const prev = deduped.length > 0 ? deduped[deduped.length - 1]! : null
+      if (!prev || Math.abs(p.x - prev.x) > 1e-9 || Math.abs(p.y - prev.y) > 1e-9) {
+        deduped.push(p)
+      }
+    }
+    // Check wrap-around: last vs first
+    if (deduped.length > 1) {
+      const first = deduped[0]!
+      const last = deduped[deduped.length - 1]!
+      if (Math.abs(first.x - last.x) < 1e-9 && Math.abs(first.y - last.y) < 1e-9) {
+        deduped.pop()
+      }
+    }
+    if (deduped.length < 3) continue
+
     ringBoundaries.push(edges.length)
     const ringStart = pts.length
     // Add tiny jitter to prevent degenerate collinear inputs
-    for (let i = 0; i < obstacle.length; i++) {
-      const p = obstacle[i]!
+    for (let i = 0; i < deduped.length; i++) {
+      const p = deduped[i]!
       pts.push([
         p.x + ((i % 7) - 3) * 1e-8,
         p.y + ((i % 5) - 2) * 1e-8,
       ])
     }
     // Constraint edges forming the closed ring
-    for (let i = 0; i < obstacle.length; i++) {
-      edges.push([ringStart + i, ringStart + (i + 1) % obstacle.length])
+    for (let i = 0; i < deduped.length; i++) {
+      edges.push([ringStart + i, ringStart + (i + 1) % deduped.length])
     }
   }
 
@@ -116,8 +137,32 @@ export function cdtTriangulate(input: {
   // --- Resolve crossing constraint edges from overlapping obstacles ---
   const resolved = resolveConstraintCrossings(pts, edges, ringBoundaries)
 
-  // --- Run CDT ---
-  const triangles: [number, number, number][] = cdt2d(resolved.pts, resolved.constraintEdges, { exterior: false })
+  // --- Run CDT (with retry on degenerate input) ---
+  // cdt2d can crash on near-degenerate geometry (near-collinear constraint edges,
+  // very close points). Retry with progressively more jitter if it fails.
+  let triangles: [number, number, number][]
+  try {
+    triangles = cdt2d(resolved.pts, resolved.constraintEdges, { exterior: false })
+  } catch {
+    // Retry with stronger random jitter on all non-bounds points
+    const jitteredPts = resolved.pts.map((p, i) => {
+      if (i < boundsEnd) return p // keep bounds precise
+      return [
+        p[0] + (Math.random() - 0.5) * 1e-5,
+        p[1] + (Math.random() - 0.5) * 1e-5,
+      ] as [number, number]
+    })
+    try {
+      triangles = cdt2d(jitteredPts, resolved.constraintEdges, { exterior: false })
+      // Update resolved.pts so downstream uses the jittered version
+      for (let i = 0; i < jitteredPts.length; i++) {
+        resolved.pts[i] = jitteredPts[i]!
+      }
+    } catch {
+      // CDT is fundamentally broken for this input — return empty result
+      return { regions: [], regionWeights: [] }
+    }
+  }
 
   // --- Filter: remove triangles whose centroid is inside any obstacle ---
   const rPts = resolved.pts

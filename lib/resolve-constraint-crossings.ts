@@ -51,7 +51,59 @@ export function resolveConstraintCrossings(
       const d2x = p4[0] - p3[0]
       const d2y = p4[1] - p3[1]
       const denom = d1x * d2y - d1y * d2x
-      if (Math.abs(denom) < 1e-10) continue
+
+      if (Math.abs(denom) < 1e-10) {
+        // Collinear edges — check for overlap and insert split points
+        // at the other edge's endpoints so overlapping segments share vertices.
+        const len1sq = d1x * d1x + d1y * d1y
+        if (len1sq < 1e-20) continue
+        const len2sq = d2x * d2x + d2y * d2y
+        if (len2sq < 1e-20) continue
+
+        // Check that edges are actually on the same line (not just parallel)
+        const perpDist =
+          Math.abs((p3[0] - p1[0]) * d1y - (p3[1] - p1[1]) * d1x) /
+          Math.sqrt(len1sq)
+        if (perpDist > 1e-6) continue
+
+        // Project edge j's endpoints onto edge i's parameter space
+        const t3 =
+          ((p3[0] - p1[0]) * d1x + (p3[1] - p1[1]) * d1y) / len1sq
+        const t4 =
+          ((p4[0] - p1[0]) * d1x + (p4[1] - p1[1]) * d1y) / len1sq
+
+        // Project edge i's endpoints onto edge j's parameter space
+        const u1 =
+          ((p1[0] - p3[0]) * d2x + (p1[1] - p3[1]) * d2y) / len2sq
+        const u2 =
+          ((p2[0] - p3[0]) * d2x + (p2[1] - p3[1]) * d2y) / len2sq
+
+        const EPS = 1e-6
+
+        // If edge j's start (p3, index b1) falls strictly inside edge i,
+        // split edge i at b1's existing index (reuse vertex, don't duplicate)
+        if (t3 > EPS && t3 < 1 - EPS) {
+          if (!edgeSplits.has(i)) edgeSplits.set(i, [])
+          edgeSplits.get(i)!.push({ t: t3, idx: b1 })
+        }
+        // If edge j's end (p4, index b2) falls strictly inside edge i
+        if (t4 > EPS && t4 < 1 - EPS) {
+          if (!edgeSplits.has(i)) edgeSplits.set(i, [])
+          edgeSplits.get(i)!.push({ t: t4, idx: b2 })
+        }
+        // If edge i's start (p1, index a1) falls strictly inside edge j
+        if (u1 > EPS && u1 < 1 - EPS) {
+          if (!edgeSplits.has(j)) edgeSplits.set(j, [])
+          edgeSplits.get(j)!.push({ t: u1, idx: a1 })
+        }
+        // If edge i's end (p2, index a2) falls strictly inside edge j
+        if (u2 > EPS && u2 < 1 - EPS) {
+          if (!edgeSplits.has(j)) edgeSplits.set(j, [])
+          edgeSplits.get(j)!.push({ t: u2, idx: a2 })
+        }
+
+        continue
+      }
 
       const t = ((p3[0] - p1[0]) * d2y - (p3[1] - p1[1]) * d2x) / denom
       const u = ((p3[0] - p1[0]) * d1y - (p3[1] - p1[1]) * d1x) / denom

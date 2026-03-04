@@ -1820,7 +1820,36 @@ function resolveConstraintCrossings(pts, constraintEdges, ringBoundaries) {
       const d2x = p4[0] - p3[0];
       const d2y = p4[1] - p3[1];
       const denom = d1x * d2y - d1y * d2x;
-      if (Math.abs(denom) < 1e-10) continue;
+      if (Math.abs(denom) < 1e-10) {
+        const len1sq = d1x * d1x + d1y * d1y;
+        if (len1sq < 1e-20) continue;
+        const len2sq = d2x * d2x + d2y * d2y;
+        if (len2sq < 1e-20) continue;
+        const perpDist = Math.abs((p3[0] - p1[0]) * d1y - (p3[1] - p1[1]) * d1x) / Math.sqrt(len1sq);
+        if (perpDist > 1e-6) continue;
+        const t3 = ((p3[0] - p1[0]) * d1x + (p3[1] - p1[1]) * d1y) / len1sq;
+        const t4 = ((p4[0] - p1[0]) * d1x + (p4[1] - p1[1]) * d1y) / len1sq;
+        const u1 = ((p1[0] - p3[0]) * d2x + (p1[1] - p3[1]) * d2y) / len2sq;
+        const u2 = ((p2[0] - p3[0]) * d2x + (p2[1] - p3[1]) * d2y) / len2sq;
+        const EPS = 1e-6;
+        if (t3 > EPS && t3 < 1 - EPS) {
+          if (!edgeSplits.has(i)) edgeSplits.set(i, []);
+          edgeSplits.get(i).push({ t: t3, idx: b1 });
+        }
+        if (t4 > EPS && t4 < 1 - EPS) {
+          if (!edgeSplits.has(i)) edgeSplits.set(i, []);
+          edgeSplits.get(i).push({ t: t4, idx: b2 });
+        }
+        if (u1 > EPS && u1 < 1 - EPS) {
+          if (!edgeSplits.has(j)) edgeSplits.set(j, []);
+          edgeSplits.get(j).push({ t: u1, idx: a1 });
+        }
+        if (u2 > EPS && u2 < 1 - EPS) {
+          if (!edgeSplits.has(j)) edgeSplits.set(j, []);
+          edgeSplits.get(j).push({ t: u2, idx: a2 });
+        }
+        continue;
+      }
       const t = ((p3[0] - p1[0]) * d2y - (p3[1] - p1[1]) * d2x) / denom;
       const u = ((p3[0] - p1[0]) * d1y - (p3[1] - p1[1]) * d1x) / denom;
       if (t > 1e-6 && t < 1 - 1e-6 && u > 1e-6 && u < 1 - 1e-6) {
@@ -1899,17 +1928,33 @@ function cdtTriangulate(input) {
   }
   for (const obstacle of obstacles) {
     if (obstacle.length < 3) continue;
-    ringBoundaries.push(edges.length);
-    const ringStart = pts.length;
+    const deduped = [];
     for (let i = 0; i < obstacle.length; i++) {
       const p = obstacle[i];
+      const prev = deduped.length > 0 ? deduped[deduped.length - 1] : null;
+      if (!prev || Math.abs(p.x - prev.x) > 1e-9 || Math.abs(p.y - prev.y) > 1e-9) {
+        deduped.push(p);
+      }
+    }
+    if (deduped.length > 1) {
+      const first = deduped[0];
+      const last = deduped[deduped.length - 1];
+      if (Math.abs(first.x - last.x) < 1e-9 && Math.abs(first.y - last.y) < 1e-9) {
+        deduped.pop();
+      }
+    }
+    if (deduped.length < 3) continue;
+    ringBoundaries.push(edges.length);
+    const ringStart = pts.length;
+    for (let i = 0; i < deduped.length; i++) {
+      const p = deduped[i];
       pts.push([
         p.x + (i % 7 - 3) * 1e-8,
         p.y + (i % 5 - 2) * 1e-8
       ]);
     }
-    for (let i = 0; i < obstacle.length; i++) {
-      edges.push([ringStart + i, ringStart + (i + 1) % obstacle.length]);
+    for (let i = 0; i < deduped.length; i++) {
+      edges.push([ringStart + i, ringStart + (i + 1) % deduped.length]);
     }
   }
   const wrPolygons = mergeWeightedRegions(
@@ -1926,7 +1971,26 @@ function cdtTriangulate(input) {
     }
   }
   const resolved = resolveConstraintCrossings(pts, edges, ringBoundaries);
-  const triangles = cdt2d(resolved.pts, resolved.constraintEdges, { exterior: false });
+  let triangles;
+  try {
+    triangles = cdt2d(resolved.pts, resolved.constraintEdges, { exterior: false });
+  } catch {
+    const jitteredPts = resolved.pts.map((p, i) => {
+      if (i < boundsEnd) return p;
+      return [
+        p[0] + (Math.random() - 0.5) * 1e-5,
+        p[1] + (Math.random() - 0.5) * 1e-5
+      ];
+    });
+    try {
+      triangles = cdt2d(jitteredPts, resolved.constraintEdges, { exterior: false });
+      for (let i = 0; i < jitteredPts.length; i++) {
+        resolved.pts[i] = jitteredPts[i];
+      }
+    } catch {
+      return { regions: [], regionWeights: [] };
+    }
+  }
   const rPts = resolved.pts;
   const filtered = triangles.filter((tri) => {
     const [a, b, c] = tri;
