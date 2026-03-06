@@ -545,6 +545,19 @@ function splitRegionsAlongPath(
 // Build final path with tangent-line geometry
 // ---------------------------------------------------------------------------
 
+/**
+ * Build final path using tangent lines between clearance circles.
+ *
+ * Each vertex has a clearance radius (r>0 for obstacle corners, r=0 otherwise).
+ * For each consecutive pair (a, b), compute the tangent line between their
+ * clearance circles using getTangents. At each obstacle corner, connect the
+ * incoming tangent point to the outgoing tangent point with an arc around
+ * the clearance circle.
+ *
+ * This is Salewski's approach: the trace is a sequence of tangent lines
+ * connected by arcs. The tangent naturally maintains clearance regardless
+ * of the path angle.
+ */
 function buildFinalPath(
   mesh: Mesh,
   path: Region[],
@@ -553,110 +566,99 @@ function buildFinalPath(
 ): { points: Point[]; arcs: { centre: Point; radius: number }[] } {
   if (path.length < 2) return { points: path.map(r => r.vertex), arcs: [] }
 
+  const r = traceClearance + traceWidth * 0.5
+
+  // Compute radius for each path vertex
+  const radii = path.map(reg => {
+    const v = mesh.vertices[reg.vertexIdx]
+    return (v?.isCorner && reg !== path[0] && reg !== path[path.length - 1]) ? r : 0
+  })
+
+  // Compute tangent segments for each consecutive pair
+  interface TangentSeg { x1: number; y1: number; x2: number; y2: number; leftA: boolean; leftB: boolean }
+  const tangents: TangentSeg[] = []
+
+  for (let i = 0; i < path.length - 1; i++) {
+    const a = path[i]!, b = path[i + 1]!
+    const ra = radii[i]!, rb = radii[i + 1]!
+
+    // Determine tangent side from path winding at each vertex
+    // At vertex a: which side of the path are we on?
+    let leftA = false
+    if (i > 0) {
+      const prev = path[i - 1]!
+      leftA = windSign(prev.rx, prev.ry, b.rx, b.ry, a.rx, a.ry) > 0
+    }
+    let leftB = false
+    if (i + 2 < path.length) {
+      const next = path[i + 2]!
+      leftB = windSign(a.rx, a.ry, next.rx, next.ry, b.rx, b.ry) > 0
+    }
+
+    if (ra < 1e-6 && rb < 1e-6) {
+      // No clearance circles — straight line
+      tangents.push({ x1: a.rx, y1: a.ry, x2: b.rx, y2: b.ry, leftA, leftB })
+    } else {
+      const [tx1, ty1, tx2, ty2] = getTangents(a.rx, a.ry, ra, leftA, b.rx, b.ry, rb, leftB)
+      tangents.push({ x1: tx1, y1: ty1, x2: tx2, y2: ty2, leftA, leftB })
+    }
+  }
+
+  // Build path from tangent segments connected by arcs
   const points: Point[] = []
   const arcs: { centre: Point; radius: number }[] = []
 
-  // Simple approach: output vertex positions, but at obstacle corners
-  // use tangent lines with clearance arcs
-  for (let i = 0; i < path.length; i++) {
-    const cur = path[i]!
-    const isCorner = cur.vertexIdx < mesh.vertices.length && mesh.vertices[cur.vertexIdx]?.isCorner
+  // First tangent entry point
+  points.push({ x: tangents[0]!.x1, y: tangents[0]!.y1 })
 
-    if (!isCorner || i === 0 || i === path.length - 1) {
-      // Not a corner, or a terminal — just use vertex position
-      points.push(cur.vertex)
-      continue
-    }
+  for (let i = 0; i < tangents.length; i++) {
+    const seg = tangents[i]!
+    const ri = radii[i + 1]! // radius at the destination vertex of this segment
 
-    // Obstacle corner: compute clearance arc
-    const prev = path[i - 1]!
-    const next = path[i + 1]!
-    const r = traceClearance + traceWidth * 0.5
+    // Add the tangent exit point on the destination circle
+    points.push({ x: seg.x2, y: seg.y2 })
 
-    // Directions from corner to prev and next
-    const dpx = prev.rx - cur.rx, dpy = prev.ry - cur.ry
-    const dnx = next.rx - cur.rx, dny = next.ry - cur.ry
-    const lenP = Math.hypot(dpx, dpy), lenN = Math.hypot(dnx, dny)
-    if (lenP < 1e-10 || lenN < 1e-10) { points.push(cur.vertex); continue }
+    // If destination has a clearance circle and there's a next segment,
+    // add an arc from this tangent exit to the next tangent entry
+    if (ri > 1e-6 && i + 1 < tangents.length) {
+      const nextSeg = tangents[i + 1]!
+      const centre = path[i + 1]!.vertex
 
-    const upx = dpx / lenP, upy = dpy / lenP
-    const unx = dnx / lenN, uny = dny / lenN
+      arcs.push({ centre, radius: ri })
 
-    const dot = upx * unx + upy * uny
-    const angle = Math.acos(Math.max(-1, Math.min(1, dot)))
-    if (angle < 1e-6 || angle > Math.PI - 1e-6) { points.push(cur.vertex); continue }
+      // Arc from seg exit point to nextSeg entry point around the circle
+      const startAngle = Math.atan2(seg.y2 - centre.y, seg.x2 - centre.x)
+      const endAngle = Math.atan2(nextSeg.y1 - centre.y, nextSeg.x1 - centre.x)
 
-    const halfAngle = angle / 2
-    const tanDist = Math.min(r / Math.tan(halfAngle), lenP * 0.4, lenN * 0.4)
-    if (tanDist < 1e-6) { points.push(cur.vertex); continue }
+      let diff = endAngle - startAngle
+      // Normalize to [-π, π]
+      while (diff > Math.PI) diff -= 2 * Math.PI
+      while (diff < -Math.PI) diff += 2 * Math.PI
 
-    // Tangent points
-    const t0x = cur.rx + upx * tanDist, t0y = cur.ry + upy * tanDist
-    const t1x = cur.rx + unx * tanDist, t1y = cur.ry + uny * tanDist
+      // Pick the shorter arc (always less than π)
+      // The winding is determined by the turn direction at this vertex
+      const prev = path[i]!, cur = path[i + 1]!, next = path[i + 2]!
+      const turnSign = windSign(prev.rx, prev.ry, next.rx, next.ry, cur.rx, cur.ry)
+      if (turnSign > 0 && diff < 0) diff += 2 * Math.PI
+      if (turnSign < 0 && diff > 0) diff -= 2 * Math.PI
+      if (turnSign === 0) diff = 0 // collinear, no arc needed
 
-    // Arc center along bisector
-    const bisX = upx + unx, bisY = upy + uny
-    const bisLen = Math.hypot(bisX, bisY)
-    if (bisLen < 1e-10) { points.push(cur.vertex); continue }
+      // Clamp to prevent full loops
+      if (Math.abs(diff) > Math.PI * 1.8) diff = Math.sign(diff) * Math.PI * 1.8
 
-    const centerDist = r / Math.sin(halfAngle)
-    const cx = cur.rx + (bisX / bisLen) * centerDist
-    const cy = cur.ry + (bisY / bisLen) * centerDist
+      const nSamples = Math.max(4, Math.ceil(Math.abs(diff) * ri * 0.5))
+      for (let s = 1; s < nSamples; s++) {
+        const t = s / nSamples
+        const a = startAngle + diff * t
+        points.push({ x: centre.x + ri * Math.cos(a), y: centre.y + ri * Math.sin(a) })
+      }
 
-    // Winding
-    const cross = dpx * dny - dpy * dnx
-    const ccw = cross < 0
-
-    arcs.push({ centre: { x: cx, y: cy }, radius: r })
-
-    // Sample arc from tangent entry to exit
-    const startA = Math.atan2(t0y - cy, t0x - cx)
-    const endA = Math.atan2(t1y - cy, t1x - cx)
-    let diff = endA - startA
-    while (diff > Math.PI) diff -= 2 * Math.PI
-    while (diff < -Math.PI) diff += 2 * Math.PI
-    if (ccw && diff < 0) diff += 2 * Math.PI
-    if (!ccw && diff > 0) diff -= 2 * Math.PI
-    if (Math.abs(diff) > Math.PI * 1.5) diff = Math.sign(diff) * Math.PI * 1.5
-
-    const n = Math.max(4, Math.ceil(Math.abs(diff) * r * 0.3))
-    for (let s = 0; s <= n; s++) {
-      const t = s / n
-      const a = startA + diff * t
-      points.push({ x: cx + r * Math.cos(a), y: cy + r * Math.sin(a) })
+      // Add the next tangent entry point
+      points.push({ x: nextSeg.x1, y: nextSeg.y1 })
     }
   }
 
   return { points, arcs }
-}
-
-function addArcSamples(
-  result: Point[],
-  centre: Point,
-  radius: number,
-  fromPt: Point,
-  toPt: Point,
-  ccw: boolean,
-): void {
-  const startAngle = Math.atan2(fromPt.y - centre.y, fromPt.x - centre.x)
-  const endAngle = Math.atan2(toPt.y - centre.y, toPt.x - centre.x)
-
-  let diff = endAngle - startAngle
-  while (diff > Math.PI) diff -= 2 * Math.PI
-  while (diff < -Math.PI) diff += 2 * Math.PI
-
-  if (ccw && diff < 0) diff += 2 * Math.PI
-  if (!ccw && diff > 0) diff -= 2 * Math.PI
-
-  // Clamp
-  if (Math.abs(diff) > Math.PI * 1.5) diff = Math.sign(diff) * Math.PI * 1.5
-
-  const n = Math.max(3, Math.ceil(Math.abs(diff) * radius * 0.2))
-  for (let s = 1; s <= n; s++) {
-    const t = s / (n + 1)
-    const a = startAngle + diff * t
-    result.push({ x: centre.x + radius * Math.cos(a), y: centre.y + radius * Math.sin(a) })
-  }
 }
 
 // ---------------------------------------------------------------------------
