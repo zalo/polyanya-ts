@@ -280,7 +280,7 @@ function dijkstraRegions(
   traceWidth: number,
   traceClearance: number,
   cuts: Map<string, Cut>,
-): Region[] | null {
+): { path: Region[]; turnRight: boolean[] } | null {
   // Min-heap by distance
   const heap: { state: DijkstraState; dist: number }[] = []
   const best = new Map<string, number>()
@@ -338,18 +338,21 @@ function dijkstraRegions(
 
     // Check if we reached the destination
     if (cur.region.vertexIdx === endVertexIdx && cur.region.incident) {
-      // Reconstruct path
-      const path: Region[] = [cur.region]
+      // Reconstruct path with turn directions
+      const states: DijkstraState[] = [cur]
       let sk: string | undefined = curKey
       while (sk) {
         const p = parent.get(sk)
         if (!p) break
-        path.push(p.region)
+        states.push(p)
         sk = stateKey(p)
         if (!parent.has(sk)) break
       }
-      path.reverse()
-      return path
+      states.reverse()
+      return {
+        path: states.map(s => s.region),
+        turnRight: states.map(s => s.turnRight),
+      }
     }
 
     // Expand neighbors
@@ -564,9 +567,9 @@ function splitRegionsAlongPath(
 function buildFinalPath(
   mesh: Mesh,
   path: Region[],
+  turnRight: boolean[],
   traceWidth: number,
   traceClearance: number,
-  obstacleEdges: Segment[] = [],
 ): { points: Point[]; arcs: { centre: Point; radius: number }[] } {
   if (path.length < 2) return { points: path.map(r => r.vertex), arcs: [] }
 
@@ -585,9 +588,9 @@ function buildFinalPath(
   })
 
   // Compute tangent segments for each consecutive pair.
-  // For each segment, try both outer tangent options and pick the
-  // SHORTER one that doesn't cross any obstacle edge. The shorter
-  // tangent is always the exterior one (going around the outside).
+  // The tangent side at each vertex comes directly from the Dijkstra
+  // search state (turnRight[]) — the exact geometric determination
+  // made during the search, using robust orient2d predicates.
   interface TangentSeg { x1: number; y1: number; x2: number; y2: number }
   const tangents: TangentSeg[] = []
 
@@ -598,45 +601,15 @@ function buildFinalPath(
     if (ra < 1e-6 && rb < 1e-6) {
       tangents.push({ x1: a.rx, y1: a.ry, x2: b.rx, y2: b.ry })
     } else {
-      // Compute both outer tangents (l1===l2) and pick the one that
-      // is shorter AND doesn't cross obstacle edges. The shorter
-      // outer tangent is the exterior one.
-      const tA = getTangents(a.rx, a.ry, ra, false, b.rx, b.ry, rb, false)
-      const tB = getTangents(a.rx, a.ry, ra, true, b.rx, b.ry, rb, true)
+      // Tangent side from Dijkstra turn direction:
+      // turnRight=true at vertex means the path turns right there,
+      // so the obstacle is on the LEFT and the tangent touches LEFT.
+      // turnRight=false means obstacle on RIGHT, tangent touches RIGHT.
+      const leftA = ra > 1e-6 ? (turnRight[i] ?? false) : false
+      const leftB = rb > 1e-6 ? (turnRight[i + 1] ?? false) : false
 
-      const lenA = Math.hypot(tA[2] - tA[0], tA[3] - tA[1])
-      const lenB = Math.hypot(tB[2] - tB[0], tB[3] - tB[1])
-
-      // Check which tangent crosses obstacle edges
-      let crossesA = false, crossesB = false
-      for (const edge of obstacleEdges) {
-        if (!crossesA && segmentsProperlyIntersect({ x: tA[0], y: tA[1] }, { x: tA[2], y: tA[3] }, edge.a, edge.b)) crossesA = true
-        if (!crossesB && segmentsProperlyIntersect({ x: tB[0], y: tB[1] }, { x: tB[2], y: tB[3] }, edge.a, edge.b)) crossesB = true
-        if (crossesA && crossesB) break
-      }
-
-      let best: [number, number, number, number]
-      if (!crossesA && !crossesB) {
-        best = lenA <= lenB ? tA : tB // both valid, pick shorter
-      } else if (!crossesA) {
-        best = tA
-      } else if (!crossesB) {
-        best = tB
-      } else {
-        // Both cross — try inner tangents as fallback
-        const tC = getTangents(a.rx, a.ry, ra, false, b.rx, b.ry, rb, true)
-        const tD = getTangents(a.rx, a.ry, ra, true, b.rx, b.ry, rb, false)
-        let crossesC = false, crossesD = false
-        for (const edge of obstacleEdges) {
-          if (!crossesC && segmentsProperlyIntersect({ x: tC[0], y: tC[1] }, { x: tC[2], y: tC[3] }, edge.a, edge.b)) crossesC = true
-          if (!crossesD && segmentsProperlyIntersect({ x: tD[0], y: tD[1] }, { x: tD[2], y: tD[3] }, edge.a, edge.b)) crossesD = true
-        }
-        if (!crossesC) best = tC
-        else if (!crossesD) best = tD
-        else best = tA // all cross, just pick one
-      }
-
-      tangents.push({ x1: best[0], y1: best[1], x2: best[2], y2: best[3] })
+      const [tx1, ty1, tx2, ty2] = getTangents(a.rx, a.ry, ra, leftA, b.rx, b.ry, rb, leftB)
+      tangents.push({ x1: tx1, y1: ty1, x2: tx2, y2: ty2 })
     }
   }
 
@@ -722,10 +695,10 @@ export function routeTraces(mesh: Mesh, traces: Trace[], clearance = 0): TraceRo
       continue
     }
 
-    // Dijkstra on regions — establishes topology
-    const regionPath = dijkstraRegions(startRegion, endVi, traceWidth, traceClearance, cuts)
+    // Dijkstra on regions — establishes topology + turn directions
+    const dijResult = dijkstraRegions(startRegion, endVi, traceWidth, traceClearance, cuts)
 
-    if (!regionPath || regionPath.length < 2) {
+    if (!dijResult || dijResult.path.length < 2) {
       results.push({
         trace, initialPath: [trace.start, trace.end], initialVertexPath: [],
         corridor: [], rubberbandPath: [trace.start, trace.end], arcs: [],
@@ -733,11 +706,13 @@ export function routeTraces(mesh: Mesh, traces: Trace[], clearance = 0): TraceRo
       continue
     }
 
+    const regionPath = dijResult.path
+    const pathTurnRight = dijResult.turnRight
+
     const initialPath = regionPath.map(r => r.vertex)
     const initialVertexPath = regionPath.map(r => r.vertexIdx)
 
     // Build clearance circles from all obstacle corner regions
-    // (uses accumulated radius which grows with each attached trace)
     const baseR = traceClearance + traceWidth * 0.5
     const clearanceCircles: ClearanceCircle[] = []
     for (const reg of regions) {
@@ -747,27 +722,27 @@ export function routeTraces(mesh: Mesh, traces: Trace[], clearance = 0): TraceRo
       if (r > 1e-6) clearanceCircles.push({ centre: v.p, radius: r })
     }
 
-    // String-pull: tighten the topological path against obstacles + other traces + clearance circles
+    // String-pull: tighten the topological path
     const otherPaths = results.map(r => r.rubberbandPath).filter(p => p.length >= 2)
     const pulled = stringPull(initialPath, obstacleEdges, otherPaths, obstacleCorners, clearanceCircles)
 
-    // Rebuild the region path to match the pulled vertices (for arc computation)
-    // Map pulled points back to regions
+    // Map pulled points back to regions + turn directions
     const pulledRegions: Region[] = []
+    const pulledTurns: boolean[] = []
     for (const p of pulled) {
-      // Find the region closest to this point
-      let bestR = regionPath[0]!, bestD = Infinity
-      for (const r of regionPath) {
-        const d = distance(p, r.vertex)
-        if (d < bestD) { bestD = d; bestR = r }
+      let bestR = regionPath[0]!, bestD = Infinity, bestIdx = 0
+      for (let ri = 0; ri < regionPath.length; ri++) {
+        const d = distance(p, regionPath[ri]!.vertex)
+        if (d < bestD) { bestD = d; bestR = regionPath[ri]!; bestIdx = ri }
       }
       if (pulledRegions.length === 0 || pulledRegions[pulledRegions.length - 1] !== bestR) {
         pulledRegions.push(bestR)
+        pulledTurns.push(pathTurnRight[bestIdx] ?? false)
       }
     }
 
-    // Build final geometry with tangent arcs at obstacle corners
-    const { points: rubberbandPath, arcs } = buildFinalPath(mesh, pulledRegions, traceWidth, traceClearance, obstacleEdges)
+    // Build final geometry with tangent arcs using Dijkstra turn directions
+    const { points: rubberbandPath, arcs } = buildFinalPath(mesh, pulledRegions, pulledTurns, traceWidth, traceClearance)
 
     // Split regions along path for future traces
     splitRegionsAlongPath(regionPath, regions, regionByVertex, cuts, traceWidth, traceClearance)
