@@ -143,8 +143,8 @@ export default function PcbRoutingPlayground() {
       start: t.start,
       end: t.end,
     }))
-    return routeTraces(mesh, traceInputs)
-  }, [mesh, traces])
+    return routeTraces(mesh, traceInputs, clearance)
+  }, [mesh, traces, clearance])
 
   // --- Mount renderer ---
   useEffect(() => {
@@ -519,11 +519,11 @@ export default function PcbRoutingPlayground() {
         <div style={{ ...cardStyle, fontSize: 11, color: "#8d99ae", lineHeight: 1.5 }}>
           <div style={{ ...cardTitle, color: "#8d99ae" }}>Algorithm</div>
           <ol style={{ margin: 0, paddingLeft: 16 }}>
-            <li>Build CDT with obstacles + trace endpoints as vertices</li>
-            <li>A* on CDT edges finds initial vertex-to-vertex path</li>
-            <li>Initial path establishes topology (which side of each obstacle)</li>
-            <li>String-pull: walk CDT to check line-of-sight between vertices</li>
-            <li>Kept vertices = obstacle corners the trace wraps around</li>
+            <li>CDT with obstacles + trace endpoints as Steiner vertices</li>
+            <li>A* on CDT edges establishes topology</li>
+            <li>String-pull against obstacles (CDT line-walk visibility)</li>
+            <li>String-pull against other traces (sidedness barriers)</li>
+            <li>Circular arcs at obstacle corners (clearance)</li>
           </ol>
         </div>
       </div>

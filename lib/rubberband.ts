@@ -1,27 +1,10 @@
 /**
  * Topological Rubberband Routing
  *
- * Phase 1 — CDT construction:
- *   Trace start/end points are Steiner points in the CDT.
- *
- * Phase 2 — Initial path via A* on CDT edges:
- *   Shortest vertex-to-vertex path along CDT edges. This establishes
- *   the topology: which side of each obstacle the trace passes.
- *
- * Phase 3 — Rubberband string-pulling:
- *   Pull the path tight like a rubber band. Walk the CDT triangulation
- *   to check line-of-sight between non-adjacent vertices. Vertices that
- *   block direct shortcuts are obstacle corners the trace wraps around
- *   (attachment points). The rubberband path is straight segments through
- *   these attachment points.
- *
- *   This is the core of topological routing: the string-pull maintains
- *   the sidedness from the initial path — the trace wraps around the
- *   same obstacle corners, just pulled tight.
- *
- * Multi-trace: crossing order at shared portals is read from geometry
- * after all initial paths are computed. Sub-portal channeling pushes
- * traces apart at shared edges.
+ * Phase 1 — Initial path via A* on CDT edges.
+ * Phase 2 — String-pull against obstacles (CDT line-walk).
+ * Phase 3 — String-pull against other traces (maintain sidedness).
+ * Phase 4 — Circular arcs at attachment points (obstacle clearance).
  *
  * Reference: Tal Dayan, "Rubber-Band Based Topological Router", PhD Dissertation, UCSC, 1997
  */
@@ -44,19 +27,22 @@ export interface TraceRoute {
   rubberbandPath: Point[]
 }
 
-const TRACE_SPACING = 1.5
-
 // ---------------------------------------------------------------------------
 // Public API
 // ---------------------------------------------------------------------------
 
-export function routeTraces(mesh: Mesh, traces: Trace[]): TraceRoute[] {
+/**
+ * Route traces with full topological rubberband routing.
+ *
+ * @param clearance - radius for circular arcs at obstacle corners (0 = sharp corners)
+ */
+export function routeTraces(mesh: Mesh, traces: Trace[], clearance = 0): TraceRoute[] {
   if (traces.length === 0) return []
 
   const adj = buildVertexAdjacency(mesh)
 
-  // Phase 1: A* on CDT edges for all traces
-  const initialResults: {
+  // Phase 1: A* on CDT edges — establishes topology
+  const phase1: {
     trace: Trace
     initialPath: Point[]
     initialVertexPath: number[]
@@ -68,65 +54,94 @@ export function routeTraces(mesh: Mesh, traces: Trace[]): TraceRoute[] {
     const vertexPath = edgeAstar(mesh, adj, startVi, endVi)
     const pointPath = vertexPath.map((vi) => mesh.vertices[vi]!.p)
     if (pointPath.length > 0) {
-      const first = pointPath[0]!
-      if (distance(trace.start, first) > 1e-6) pointPath.unshift(trace.start)
-      const last = pointPath[pointPath.length - 1]!
-      if (distance(trace.end, last) > 1e-6) pointPath.push(trace.end)
+      if (distance(trace.start, pointPath[0]!) > 1e-6) pointPath.unshift(trace.start)
+      if (distance(trace.end, pointPath[pointPath.length - 1]!) > 1e-6) pointPath.push(trace.end)
     }
-    initialResults.push({ trace, initialPath: pointPath, initialVertexPath: vertexPath })
+    phase1.push({ trace, initialPath: pointPath, initialVertexPath: vertexPath })
   }
 
-  // Phase 2: String-pull each trace using CDT line-walk visibility
-  const results: TraceRoute[] = []
-  for (const { trace, initialPath, initialVertexPath } of initialResults) {
-    if (initialPath.length < 2) {
-      results.push({
-        trace,
-        initialPath,
-        initialVertexPath,
-        corridor: [],
-        rubberbandPath: initialPath,
-      })
-      continue
+  // Phase 2: String-pull each trace against obstacles only
+  let paths: Point[][] = phase1.map(({ initialPath }) =>
+    initialPath.length >= 2 ? stringPull(mesh, initialPath, []) : [...initialPath],
+  )
+
+  // Phase 3: Iterative string-pull against other traces (sidedness).
+  // Each trace re-pulls treating other traces' current paths as barriers.
+  // Iterate until paths stabilize or max iterations reached.
+  const MAX_ITERS = 5
+  for (let iter = 0; iter < MAX_ITERS; iter++) {
+    let changed = false
+    const newPaths: Point[][] = []
+
+    for (let i = 0; i < phase1.length; i++) {
+      const { initialPath } = phase1[i]!
+      if (initialPath.length < 2) {
+        newPaths.push(paths[i]!)
+        continue
+      }
+
+      // Collect other traces' paths as barrier segments
+      const otherPaths: Point[][] = []
+      for (let j = 0; j < paths.length; j++) {
+        if (j !== i && paths[j]!.length >= 2) otherPaths.push(paths[j]!)
+      }
+
+      const pulled = stringPull(mesh, initialPath, otherPaths)
+
+      // Check if this path changed
+      if (!pathsEqual(pulled, paths[i]!)) changed = true
+      newPaths.push(pulled)
     }
 
-    const rubberbandPath = stringPull(mesh, initialPath)
-    // Build corridor from the initial vertex path for visualization
-    const corridor = corridorFromVertexPath(mesh, initialVertexPath)
-
-    results.push({ trace, initialPath, initialVertexPath, corridor, rubberbandPath })
+    paths = newPaths
+    if (!changed) break
   }
 
-  return results
+  // Phase 4: Add circular arcs at obstacle corner attachment points
+  if (clearance > 0) {
+    for (let i = 0; i < paths.length; i++) {
+      paths[i] = addClearanceArcs(mesh, paths[i]!, clearance)
+    }
+  }
+
+  // Build results
+  return phase1.map(({ trace, initialPath, initialVertexPath }, i) => ({
+    trace,
+    initialPath,
+    initialVertexPath,
+    corridor: corridorFromVertexPath(mesh, initialVertexPath),
+    rubberbandPath: paths[i]!,
+  }))
+}
+
+function pathsEqual(a: Point[], b: Point[]): boolean {
+  if (a.length !== b.length) return false
+  for (let i = 0; i < a.length; i++) {
+    if (Math.abs(a[i]!.x - b[i]!.x) > 1e-8 || Math.abs(a[i]!.y - b[i]!.y) > 1e-8) return false
+  }
+  return true
 }
 
 // ---------------------------------------------------------------------------
-// String-pulling (rubberband tightening)
+// String-pulling with obstacle + trace barriers
 // ---------------------------------------------------------------------------
 
 /**
- * String-pull a path through the CDT.
- *
- * Starting from the first point, try to skip ahead as far as possible
- * by checking line-of-sight through the triangulation. When the line
- * crosses a boundary/obstacle edge, the last visible vertex becomes
- * an attachment point (the trace wraps around that obstacle corner).
- *
- * This is the rubber band: it pulls tight against obstacle corners
- * while maintaining the topology established by the initial A* path.
+ * String-pull a path. Checks line-of-sight against:
+ * 1. CDT boundary edges (obstacles)
+ * 2. Other traces' path segments (trace-to-trace sidedness)
  */
-function stringPull(mesh: Mesh, path: Point[]): Point[] {
+function stringPull(mesh: Mesh, path: Point[], otherTraces: Point[][]): Point[] {
   if (path.length <= 2) return [...path]
 
   const result: Point[] = [path[0]!]
   let current = 0
 
   while (current < path.length - 1) {
-    // Try to reach as far ahead as possible
     let farthest = current + 1
 
     for (let target = path.length - 1; target > current + 1; target--) {
-      if (hasLineOfSight(mesh, path[current]!, path[target]!)) {
+      if (hasLineOfSight(mesh, path[current]!, path[target]!, otherTraces)) {
         farthest = target
         break
       }
@@ -140,22 +155,29 @@ function stringPull(mesh: Mesh, path: Point[]): Point[] {
 }
 
 /**
- * Check line-of-sight between two points by walking the CDT.
- *
- * Walk from triangle to triangle along the ray from→to. At each
- * triangle, find the edge the ray exits through. If that edge is a
- * boundary (obstacle), sight is blocked. If we reach the triangle
- * containing 'to', sight is clear.
+ * Line-of-sight check: walk CDT triangles from→to.
+ * Blocked if the ray crosses a boundary edge OR any segment of otherTraces.
  */
-function hasLineOfSight(mesh: Mesh, from: Point, to: Point): boolean {
-  // getPointLocation may return vertex/edge locations where poly1 is still valid,
-  // but we need a triangle to start the walk. Use poly1 which should be >= 0
-  // for any point on the mesh (vertex, edge, or interior).
+function hasLineOfSight(
+  mesh: Mesh,
+  from: Point,
+  to: Point,
+  otherTraces: Point[][],
+): boolean {
+  // First check: does the segment cross any other trace?
+  for (const trace of otherTraces) {
+    for (let i = 0; i < trace.length - 1; i++) {
+      if (segmentsProperlyIntersect(from, to, trace[i]!, trace[i + 1]!)) {
+        return false
+      }
+    }
+  }
+
+  // Second check: walk the CDT to verify no obstacle edge is crossed
   const loc = mesh.getPointLocation(from)
   let startPoly = loc.poly1
   if (startPoly < 0) startPoly = loc.poly2
   if (startPoly < 0) {
-    // Point not on mesh — try finding the triangle containing a nudged point
     const nudge: Point = {
       x: from.x + (to.x - from.x) * 1e-6,
       y: from.y + (to.y - from.y) * 1e-6,
@@ -172,28 +194,20 @@ function hasLineOfSight(mesh: Mesh, from: Point, to: Point): boolean {
     const poly = mesh.polygons[currentPoly]!
     const V = poly.vertices
 
-    // Check if 'to' is inside (or on the boundary of) this triangle
     if (pointInTriangleLoose(to, mesh, V)) return true
 
-    // Find the edge the ray from→to exits through.
-    // Skip the edge we entered from (to avoid going backwards).
     let foundNext = false
-
     for (let i = 0; i < V.length; i++) {
       const i2 = (i + 1) % V.length
-      // Adjacency for edge (V[i], V[i2]): polygons[(i+1) % N]
       const adjIdx = i2
       const adj = poly.polygons[adjIdx]!
-
-      // Don't go back to where we came from
       if (adj === prevPoly) continue
 
       const ea = mesh.vertices[V[i]!]!.p
       const eb = mesh.vertices[V[i2]!]!.p
 
-      // Does the ray from→to cross this edge?
       if (rayProperlyIntersectsEdge(from, to, ea, eb)) {
-        if (adj === -1) return false // boundary edge — blocked
+        if (adj === -1) return false
         prevPoly = currentPoly
         currentPoly = adj
         foundNext = true
@@ -201,47 +215,48 @@ function hasLineOfSight(mesh: Mesh, from: Point, to: Point): boolean {
       }
     }
 
-    if (!foundNext) {
-      // Didn't find an exit edge — likely 'to' is on an edge/vertex
-      // of the current triangle. Treat as visible.
-      return true
-    }
+    if (!foundNext) return true
   }
 
   return false
 }
 
 /**
- * Check if the directed segment from→to crosses the edge ea→eb.
- * Uses a robust test that handles 'from' being on a triangle vertex.
+ * Test if two segments properly intersect (cross each other's interiors).
+ * Endpoint-touching does NOT count as an intersection.
  */
+function segmentsProperlyIntersect(
+  a1: Point, a2: Point, b1: Point, b2: Point,
+): boolean {
+  const d1 = triArea2(a1, a2, b1)
+  const d2 = triArea2(a1, a2, b2)
+  const d3 = triArea2(b1, b2, a1)
+  const d4 = triArea2(b1, b2, a2)
+
+  // Both endpoints of each segment must be on strictly opposite sides
+  if (((d1 > 1e-10 && d2 < -1e-10) || (d1 < -1e-10 && d2 > 1e-10)) &&
+      ((d3 > 1e-10 && d4 < -1e-10) || (d3 < -1e-10 && d4 > 1e-10))) {
+    return true
+  }
+  return false
+}
+
 function rayProperlyIntersectsEdge(
   from: Point, to: Point, ea: Point, eb: Point,
 ): boolean {
-  // ea and eb must be on strictly opposite sides of line from→to
   const d1 = triArea2(from, to, ea)
   const d2 = triArea2(from, to, eb)
-  if (d1 * d2 >= -1e-20) return false // same side, or one is on the line
+  if (d1 * d2 >= -1e-20) return false
 
-  // from and to don't both need to be on opposite sides of ea→eb
-  // because 'from' might be on the edge line (it's a vertex of the triangle).
-  // We just need 'to' to be reachable through this edge.
   const d3 = triArea2(ea, eb, from)
   const d4 = triArea2(ea, eb, to)
 
-  // Standard crossing: from and to on opposite sides
   if ((d3 > 1e-10 && d4 < -1e-10) || (d3 < -1e-10 && d4 > 1e-10)) return true
-
-  // 'from' is on the edge line (it's a vertex shared by this edge) —
-  // just check that 'to' is on the other side
   if (Math.abs(d3) <= 1e-10 && Math.abs(d4) > 1e-10) return true
 
   return false
 }
 
-/**
- * Loose point-in-triangle test (includes points on edges/vertices).
- */
 function pointInTriangleLoose(p: Point, mesh: Mesh, V: number[]): boolean {
   if (V.length < 3) return false
   const a = mesh.vertices[V[0]!]!.p
@@ -259,7 +274,138 @@ function pointInTriangleLoose(p: Point, mesh: Mesh, V: number[]): boolean {
 }
 
 // ---------------------------------------------------------------------------
-// Corridor (for visualization only)
+// Phase 4: Circular arcs at obstacle corners
+// ---------------------------------------------------------------------------
+
+/**
+ * At each interior vertex of the path that is an obstacle corner,
+ * replace the sharp corner with a circular arc of the given radius.
+ *
+ * The arc wraps around the obstacle corner, maintaining clearance.
+ * This is the "spokes" concept from Dayan's dissertation.
+ */
+function addClearanceArcs(mesh: Mesh, path: Point[], radius: number): Point[] {
+  if (path.length < 3 || radius <= 0) return path
+
+  const result: Point[] = [path[0]!]
+
+  for (let i = 1; i < path.length - 1; i++) {
+    const prev = path[i - 1]!
+    const curr = path[i]!
+    const next = path[i + 1]!
+
+    // Check if this vertex is an obstacle corner
+    if (!isObstacleCorner(mesh, curr)) {
+      result.push(curr)
+      continue
+    }
+
+    // Compute the arc around this corner
+    const arcPoints = computeArc(prev, curr, next, radius)
+    for (const p of arcPoints) result.push(p)
+  }
+
+  result.push(path[path.length - 1]!)
+  return result
+}
+
+/**
+ * Check if a point coincides with an obstacle corner vertex in the mesh.
+ */
+function isObstacleCorner(mesh: Mesh, p: Point): boolean {
+  for (const v of mesh.vertices) {
+    if (!v || !v.isCorner) continue
+    if (Math.abs(v.p.x - p.x) < 1e-4 && Math.abs(v.p.y - p.y) < 1e-4) {
+      return true
+    }
+  }
+  return false
+}
+
+/**
+ * Compute arc sample points around a corner vertex.
+ *
+ * The arc is tangent to both incoming (prev→curr) and outgoing (curr→next)
+ * segments, with the given radius, wrapping around the corner.
+ */
+function computeArc(
+  prev: Point,
+  corner: Point,
+  next: Point,
+  radius: number,
+): Point[] {
+  // Direction vectors from corner to prev and next
+  const dxP = prev.x - corner.x
+  const dyP = prev.y - corner.y
+  const dxN = next.x - corner.x
+  const dyN = next.y - corner.y
+
+  const lenP = Math.sqrt(dxP * dxP + dyP * dyP)
+  const lenN = Math.sqrt(dxN * dxN + dyN * dyN)
+  if (lenP < 1e-10 || lenN < 1e-10) return [corner]
+
+  // Unit vectors
+  const upx = dxP / lenP, upy = dyP / lenP
+  const unx = dxN / lenN, uny = dyN / lenN
+
+  // Half-angle between the two segments
+  const dot = upx * unx + upy * uny
+  const halfAngle = Math.acos(Math.max(-1, Math.min(1, dot))) / 2
+
+  if (halfAngle < 1e-6 || halfAngle > Math.PI - 1e-6) return [corner]
+
+  // Distance from corner to the tangent points
+  const tangentDist = Math.min(radius / Math.tan(halfAngle), lenP * 0.4, lenN * 0.4)
+  if (tangentDist < 1e-6) return [corner]
+
+  // Tangent points on each segment
+  const t1: Point = { x: corner.x + upx * tangentDist, y: corner.y + upy * tangentDist }
+  const t2: Point = { x: corner.x + unx * tangentDist, y: corner.y + uny * tangentDist }
+
+  // Arc center: offset from corner along the angle bisector
+  const bisX = upx + unx
+  const bisY = upy + uny
+  const bisLen = Math.sqrt(bisX * bisX + bisY * bisY)
+  if (bisLen < 1e-10) return [corner]
+
+  const centerDist = tangentDist / Math.cos(Math.PI / 2 - halfAngle)
+  const cx = corner.x + (bisX / bisLen) * centerDist
+  const cy = corner.y + (bisY / bisLen) * centerDist
+
+  // Compute arc angles
+  const startAngle = Math.atan2(t1.y - cy, t1.x - cx)
+  let endAngle = Math.atan2(t2.y - cy, t2.x - cx)
+
+  // Determine arc direction (shorter arc that wraps around the corner)
+  const cross = upx * uny - upy * unx
+  let angleDiff = endAngle - startAngle
+  if (cross > 0) {
+    // CCW turn — arc should go CW (negative angle diff)
+    if (angleDiff > 0) angleDiff -= 2 * Math.PI
+  } else {
+    // CW turn — arc should go CCW (positive angle diff)
+    if (angleDiff < 0) angleDiff += 2 * Math.PI
+  }
+
+  // Sample the arc
+  const arcRadius = Math.sqrt((t1.x - cx) * (t1.x - cx) + (t1.y - cy) * (t1.y - cy))
+  const numSamples = Math.max(3, Math.ceil(Math.abs(angleDiff) * arcRadius / (radius * 0.5)))
+  const points: Point[] = []
+
+  for (let s = 0; s <= numSamples; s++) {
+    const t = s / numSamples
+    const angle = startAngle + angleDiff * t
+    points.push({
+      x: cx + arcRadius * Math.cos(angle),
+      y: cy + arcRadius * Math.sin(angle),
+    })
+  }
+
+  return points
+}
+
+// ---------------------------------------------------------------------------
+// Corridor (for visualization)
 // ---------------------------------------------------------------------------
 
 function polysContainingEdge(mesh: Mesh, va: number, vb: number): number[] {
@@ -284,13 +430,10 @@ function corridorFromVertexPath(mesh: Mesh, vertexPath: number[]): number[] {
 
     if (edgePolys.length === 1) {
       const pi = edgePolys[0]!
-      if (corridor.length === 0 || corridor[corridor.length - 1] !== pi) {
-        corridor.push(pi)
-      }
+      if (corridor.length === 0 || corridor[corridor.length - 1] !== pi) corridor.push(pi)
       continue
     }
 
-    // Pick side toward next vertex
     let refVertex: number | null = null
     if (i + 2 < vertexPath.length) refVertex = vertexPath[i + 2]!
     else if (i > 0) refVertex = vertexPath[i - 1]!
@@ -306,22 +449,19 @@ function corridorFromVertexPath(mesh: Mesh, vertexPath: number[]): number[] {
         const thirdV = poly.vertices.find((v) => v !== va && v !== vb)
         if (thirdV !== undefined) {
           const pThird = mesh.vertices[thirdV]!.p
-          const sideThird = triArea2(pA, pB, pThird)
-          if ((sideRef > 0) === (sideThird > 0)) { chosen = pi; break }
+          if ((sideRef > 0) === (triArea2(pA, pB, pThird) > 0)) { chosen = pi; break }
         }
       }
     }
 
-    if (corridor.length === 0 || corridor[corridor.length - 1] !== chosen) {
-      corridor.push(chosen)
-    }
+    if (corridor.length === 0 || corridor[corridor.length - 1] !== chosen) corridor.push(chosen)
   }
 
   return corridor
 }
 
 // ---------------------------------------------------------------------------
-// Vertex adjacency graph
+// Vertex adjacency graph + A*
 // ---------------------------------------------------------------------------
 
 type AdjacencyGraph = Map<number, Set<number>>
@@ -329,111 +469,70 @@ type AdjacencyGraph = Map<number, Set<number>>
 function buildVertexAdjacency(mesh: Mesh): AdjacencyGraph {
   const adj: AdjacencyGraph = new Map()
   const ensure = (v: number) => { if (!adj.has(v)) adj.set(v, new Set()) }
-
   for (const poly of mesh.polygons) {
     if (!poly) continue
-    const V = poly.vertices
-    for (let i = 0; i < V.length; i++) {
-      const a = V[i]!
-      const b = V[(i + 1) % V.length]!
+    for (let i = 0; i < poly.vertices.length; i++) {
+      const a = poly.vertices[i]!
+      const b = poly.vertices[(i + 1) % poly.vertices.length]!
       ensure(a); ensure(b)
-      adj.get(a)!.add(b)
-      adj.get(b)!.add(a)
+      adj.get(a)!.add(b); adj.get(b)!.add(a)
     }
   }
   return adj
 }
 
-// ---------------------------------------------------------------------------
-// A* on CDT edges
-// ---------------------------------------------------------------------------
-
 function findNearestVertex(mesh: Mesh, p: Point): number {
-  let bestIdx = 0
-  let bestDist = Infinity
+  let best = 0, bestD = Infinity
   for (let i = 0; i < mesh.vertices.length; i++) {
     const v = mesh.vertices[i]
     if (!v) continue
     const d = distance(p, v.p)
-    if (d < bestDist) { bestDist = d; bestIdx = i }
+    if (d < bestD) { bestD = d; best = i }
   }
-  return bestIdx
+  return best
 }
 
-function edgeAstar(
-  mesh: Mesh,
-  adj: AdjacencyGraph,
-  startVi: number,
-  goalVi: number,
-): number[] {
-  if (startVi === goalVi) return [startVi]
-
-  const goalP = mesh.vertices[goalVi]!.p
+function edgeAstar(mesh: Mesh, adj: AdjacencyGraph, start: number, goal: number): number[] {
+  if (start === goal) return [start]
+  const goalP = mesh.vertices[goal]!.p
   const gBest = new Map<number, number>()
-  const cameFrom = new Map<number, number>()
-
+  const from = new Map<number, number>()
   const heap: { vi: number; f: number; g: number }[] = []
-  const push = (e: { vi: number; f: number; g: number }) => {
-    heap.push(e)
-    let i = heap.length - 1
-    while (i > 0) {
-      const pi = (i - 1) >> 1
-      if (heap[pi]!.f <= heap[i]!.f) break
-      const tmp = heap[pi]!; heap[pi] = heap[i]!; heap[i] = tmp
-      i = pi
-    }
+
+  const push = (e: typeof heap[0]) => {
+    heap.push(e); let i = heap.length - 1
+    while (i > 0) { const p = (i - 1) >> 1; if (heap[p]!.f <= heap[i]!.f) break; [heap[p], heap[i]] = [heap[i]!, heap[p]!]; i = p }
   }
   const pop = () => {
-    const top = heap[0]!
-    const last = heap.pop()!
-    if (heap.length > 0) {
-      heap[0] = last
-      let i = 0
-      for (;;) {
-        let s = i
-        const l = 2 * i + 1, r = 2 * i + 2
-        if (l < heap.length && heap[l]!.f < heap[s]!.f) s = l
-        if (r < heap.length && heap[r]!.f < heap[s]!.f) s = r
-        if (s === i) break
-        const tmp = heap[i]!; heap[i] = heap[s]!; heap[s] = tmp
-        i = s
-      }
-    }
+    const top = heap[0]!; const last = heap.pop()!
+    if (heap.length > 0) { heap[0] = last; let i = 0; for (;;) { let s = i; const l = 2*i+1, r = 2*i+2; if (l < heap.length && heap[l]!.f < heap[s]!.f) s = l; if (r < heap.length && heap[r]!.f < heap[s]!.f) s = r; if (s === i) break; [heap[i], heap[s]] = [heap[s]!, heap[i]!]; i = s } }
     return top
   }
 
-  gBest.set(startVi, 0)
-  push({ vi: startVi, g: 0, f: distance(mesh.vertices[startVi]!.p, goalP) })
+  gBest.set(start, 0)
+  push({ vi: start, g: 0, f: distance(mesh.vertices[start]!.p, goalP) })
 
   while (heap.length > 0) {
     const cur = pop()
     if (cur.g > (gBest.get(cur.vi) ?? Infinity)) continue
-
-    if (cur.vi === goalVi) {
-      const path: number[] = [goalVi]
-      let v = goalVi
-      while (cameFrom.has(v)) { v = cameFrom.get(v)!; path.push(v) }
-      path.reverse()
-      return path
+    if (cur.vi === goal) {
+      const path = [goal]; let v = goal
+      while (from.has(v)) { v = from.get(v)!; path.push(v) }
+      return path.reverse()
     }
-
-    const neighbors = adj.get(cur.vi)
-    if (!neighbors) continue
-    for (const nvi of neighbors) {
+    for (const nvi of adj.get(cur.vi) ?? []) {
       const ng = cur.g + distance(mesh.vertices[cur.vi]!.p, mesh.vertices[nvi]!.p)
       if (ng < (gBest.get(nvi) ?? Infinity)) {
-        gBest.set(nvi, ng)
-        cameFrom.set(nvi, cur.vi)
+        gBest.set(nvi, ng); from.set(nvi, cur.vi)
         push({ vi: nvi, g: ng, f: ng + distance(mesh.vertices[nvi]!.p, goalP) })
       }
     }
   }
-
   return []
 }
 
 // ---------------------------------------------------------------------------
-// Geometry helpers
+// Geometry
 // ---------------------------------------------------------------------------
 
 function triArea2(a: Point, b: Point, c: Point): number {
