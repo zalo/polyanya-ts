@@ -456,35 +456,20 @@ function corridorFromVertexPath(mesh: Mesh, vertexPath: number[]): number[] {
 type AdjGraph = Map<number, Set<number>>
 
 /**
- * Build vertex adjacency graph from INTERIOR CDT edges only.
- * Edges where polygon adjacency is -1 (obstacle/boundary constraints)
- * are excluded — the A* must not walk along obstacle edges.
- * This prevents traces from "sticking" to obstacle surfaces.
+ * Build vertex adjacency graph from ALL CDT edges (including obstacle
+ * boundary edges). The A* can walk along obstacle surfaces — the
+ * rubberband/string-pull handles pulling traces away with clearance.
  */
 function buildVertexAdjacency(mesh: Mesh): AdjGraph {
   const adj: AdjGraph = new Map()
-  const ensure = (v: number) => { if (!adj.has(v)) adj.set(v, new Set()) }
-
   for (const poly of mesh.polygons) {
     if (!poly) continue
-    const V = poly.vertices
-    for (let i = 0; i < V.length; i++) {
-      const i2 = (i + 1) % V.length
-      const a = V[i]!, b = V[i2]!
-      // polygons[i2] is adjacency for edge (V[i], V[i2])
-      const adjPoly = poly.polygons[i2]!
-      if (adjPoly === -1) continue // skip boundary/obstacle edges
-
-      ensure(a); ensure(b)
+    for (let i = 0; i < poly.vertices.length; i++) {
+      const a = poly.vertices[i]!, b = poly.vertices[(i + 1) % poly.vertices.length]!
+      if (!adj.has(a)) adj.set(a, new Set()); if (!adj.has(b)) adj.set(b, new Set())
       adj.get(a)!.add(b); adj.get(b)!.add(a)
     }
   }
-
-  // Ensure all vertices have entries even if they have no interior edges
-  for (let i = 0; i < mesh.vertices.length; i++) {
-    if (mesh.vertices[i] && !adj.has(i)) adj.set(i, new Set())
-  }
-
   return adj
 }
 
