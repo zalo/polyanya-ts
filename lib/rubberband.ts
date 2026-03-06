@@ -799,19 +799,19 @@ function stringPull(
   return result
 }
 
+/**
+ * Line-of-sight: blocked only if the segment properly crosses an obstacle
+ * edge or another trace segment. The obstacle edge crossing check is
+ * sufficient — clearance arcs handle corner offset separately.
+ */
 function hasLineOfSight(
   from: Point, to: Point,
   obstacleEdges: Segment[],
   otherTraces: Point[][],
-  obstacleCorners: Point[],
+  _obstacleCorners: Point[],
 ): boolean {
   for (const edge of obstacleEdges) {
     if (segmentsProperlyIntersect(from, to, edge.a, edge.b)) return false
-  }
-  for (const c of obstacleCorners) {
-    if ((Math.abs(c.x - from.x) < 1e-4 && Math.abs(c.y - from.y) < 1e-4) ||
-        (Math.abs(c.x - to.x) < 1e-4 && Math.abs(c.y - to.y) < 1e-4)) continue
-    if (pointToSegmentDist(c, from, to) < 0.5) return false
   }
   for (const trace of otherTraces) {
     for (let i = 0; i < trace.length - 1; i++) {
