@@ -265,30 +265,91 @@ function edgeAstar(
 // ---------------------------------------------------------------------------
 
 /**
- * Given a vertex path along CDT edges, collect the corridor of polygons
- * touched by those edges. For each edge (vi, vi+1), find the polygon(s)
- * that contain both vertices and add them to the corridor.
+ * Find the polygon(s) that contain a given edge (both vertex indices).
+ */
+function polysContainingEdge(mesh: Mesh, va: number, vb: number): number[] {
+  const result: number[] = []
+  const polysA = mesh.vertices[va]!.polygons
+  const polysB = new Set(mesh.vertices[vb]!.polygons)
+  for (const pi of polysA) {
+    if (pi !== -1 && polysB.has(pi)) result.push(pi)
+  }
+  return result
+}
+
+function polyHasVertex(mesh: Mesh, polyIdx: number, vi: number): boolean {
+  return mesh.polygons[polyIdx]!.vertices.includes(vi)
+}
+
+/**
+ * Given a vertex path along CDT edges, build the corridor of polygons.
+ *
+ * For each edge (va, vb) in the path, we choose ONE of the (up to 2)
+ * triangles sharing that edge. The choice is made by looking at the
+ * NEXT vertex in the path — we pick the triangle on the same side as
+ * the next vertex. For the last edge, we use the previous triangle's
+ * side for consistency.
+ *
+ * This produces a corridor with exactly one triangle per path edge,
+ * on the correct side of the path at each step.
  */
 function corridorFromVertexPath(mesh: Mesh, vertexPath: number[]): number[] {
   if (vertexPath.length < 2) return []
 
   const corridor: number[] = []
-  const added = new Set<number>()
 
   for (let i = 0; i < vertexPath.length - 1; i++) {
     const va = vertexPath[i]!
     const vb = vertexPath[i + 1]!
+    const edgePolys = polysContainingEdge(mesh, va, vb)
+    if (edgePolys.length === 0) continue
 
-    // Find polygons that share this edge
-    const polysA = mesh.vertices[va]!.polygons
-    const polysB = new Set(mesh.vertices[vb]!.polygons)
-
-    for (const pi of polysA) {
-      if (pi === -1) continue
-      if (polysB.has(pi) && !added.has(pi)) {
+    if (edgePolys.length === 1) {
+      // Boundary edge — only one triangle
+      const pi = edgePolys[0]!
+      if (corridor.length === 0 || corridor[corridor.length - 1] !== pi) {
         corridor.push(pi)
-        added.add(pi)
       }
+      continue
+    }
+
+    // Two triangles share this edge. Pick the one on the correct side.
+    // "Correct side" = the side that the NEXT vertex is on (if available),
+    // or the side the PREVIOUS vertex is on (for the last edge).
+    let refVertex: number | null = null
+    if (i + 2 < vertexPath.length) {
+      refVertex = vertexPath[i + 2]!
+    } else if (i > 0) {
+      refVertex = vertexPath[i - 1]!
+    }
+
+    let chosen: number
+    if (refVertex !== null) {
+      const pA = mesh.vertices[va]!.p
+      const pB = mesh.vertices[vb]!.p
+      const pRef = mesh.vertices[refVertex]!.p
+      const sideRef = triArea2(pA, pB, pRef)
+
+      // Pick the triangle whose third vertex is on the same side as refVertex
+      chosen = edgePolys[0]!
+      for (const pi of edgePolys) {
+        const poly = mesh.polygons[pi]!
+        const thirdV = poly.vertices.find((v) => v !== va && v !== vb)
+        if (thirdV !== undefined) {
+          const pThird = mesh.vertices[thirdV]!.p
+          const sideThird = triArea2(pA, pB, pThird)
+          if ((sideRef > 0) === (sideThird > 0)) {
+            chosen = pi
+            break
+          }
+        }
+      }
+    } else {
+      chosen = edgePolys[0]!
+    }
+
+    if (corridor.length === 0 || corridor[corridor.length - 1] !== chosen) {
+      corridor.push(chosen)
     }
   }
 
