@@ -49,9 +49,11 @@ export function routeTraces(mesh: Mesh, traces: Trace[], clearance = 0): TraceRo
 
   const adj = buildVertexAdjacency(mesh)
 
-  // Precompute ALL obstacle (boundary) edge segments once.
-  // An edge is a boundary edge if its polygon adjacency is -1.
+  // Precompute obstacle geometry for LOS checks
   const obstacleEdges = collectObstacleEdges(mesh)
+  const obstacleCorners: Point[] = mesh.vertices
+    .filter((v): v is NonNullable<typeof v> => !!v && v.isCorner)
+    .map(v => v.p)
 
   const results: TraceRoute[] = []
 
@@ -70,7 +72,7 @@ export function routeTraces(mesh: Mesh, traces: Trace[], clearance = 0): TraceRo
     // Phase 2: String-pull against obstacles + existing routes
     const otherPaths = results.map(r => r.rubberbandPath).filter(p => p.length >= 2)
     const pulled = pointPath.length >= 2
-      ? stringPull(pointPath, obstacleEdges, otherPaths)
+      ? stringPull(pointPath, obstacleEdges, otherPaths, obstacleCorners)
       : [...pointPath]
 
     // Phase 3: Rubberband arc insertion at obstacle corners
@@ -142,6 +144,7 @@ function stringPull(
   path: Point[],
   obstacleEdges: Segment[],
   otherTraces: Point[][],
+  obstacleCorners: Point[],
 ): Point[] {
   if (path.length <= 2) return [...path]
 
@@ -152,7 +155,7 @@ function stringPull(
     let farthest = current + 1
 
     for (let target = path.length - 1; target > current + 1; target--) {
-      if (hasLineOfSight(path[current]!, path[target]!, obstacleEdges, otherTraces)) {
+      if (hasLineOfSight(path[current]!, path[target]!, obstacleEdges, otherTraces, obstacleCorners)) {
         farthest = target
         break
       }
@@ -167,22 +170,37 @@ function stringPull(
 
 /**
  * Line-of-sight check: does the segment from→to cross any obstacle edge
- * or any other trace segment?
+ * or pass through any obstacle corner vertex or cross any other trace?
  *
- * This is the robust version: instead of walking the CDT (which has
- * precision issues at vertices), test against all obstacle edges directly.
- * This matches how gEDA checks constraints — an edge is blocked if it
- * crosses a constraint that doesn't belong to the current net.
+ * Three checks:
+ * 1. Proper crossing with obstacle edges (strict intersection)
+ * 2. Passing through obstacle corner vertices (within epsilon of a corner
+ *    that isn't from or to) — this prevents zero-clearance paths
+ * 3. Proper crossing with other trace segments
  */
 function hasLineOfSight(
   from: Point,
   to: Point,
   obstacleEdges: Segment[],
   otherTraces: Point[][],
+  obstacleCorners?: Point[],
 ): boolean {
   // Check obstacle edges
   for (const edge of obstacleEdges) {
     if (segmentsProperlyIntersect(from, to, edge.a, edge.b)) return false
+  }
+
+  // Check if segment passes through any obstacle corner (zero clearance)
+  if (obstacleCorners) {
+    for (const c of obstacleCorners) {
+      // Skip if corner is one of the endpoints
+      if ((Math.abs(c.x - from.x) < 1e-4 && Math.abs(c.y - from.y) < 1e-4) ||
+          (Math.abs(c.x - to.x) < 1e-4 && Math.abs(c.y - to.y) < 1e-4)) continue
+
+      // Check if corner is very close to the segment
+      const d = pointToSegmentDist(c, from, to)
+      if (d < 0.5) return false // closer than half a unit = blocked
+    }
   }
 
   // Check other traces
@@ -437,16 +455,36 @@ function corridorFromVertexPath(mesh: Mesh, vertexPath: number[]): number[] {
 
 type AdjGraph = Map<number, Set<number>>
 
+/**
+ * Build vertex adjacency graph from INTERIOR CDT edges only.
+ * Edges where polygon adjacency is -1 (obstacle/boundary constraints)
+ * are excluded — the A* must not walk along obstacle edges.
+ * This prevents traces from "sticking" to obstacle surfaces.
+ */
 function buildVertexAdjacency(mesh: Mesh): AdjGraph {
   const adj: AdjGraph = new Map()
+  const ensure = (v: number) => { if (!adj.has(v)) adj.set(v, new Set()) }
+
   for (const poly of mesh.polygons) {
     if (!poly) continue
-    for (let i = 0; i < poly.vertices.length; i++) {
-      const a = poly.vertices[i]!, b = poly.vertices[(i + 1) % poly.vertices.length]!
-      if (!adj.has(a)) adj.set(a, new Set()); if (!adj.has(b)) adj.set(b, new Set())
+    const V = poly.vertices
+    for (let i = 0; i < V.length; i++) {
+      const i2 = (i + 1) % V.length
+      const a = V[i]!, b = V[i2]!
+      // polygons[i2] is adjacency for edge (V[i], V[i2])
+      const adjPoly = poly.polygons[i2]!
+      if (adjPoly === -1) continue // skip boundary/obstacle edges
+
+      ensure(a); ensure(b)
       adj.get(a)!.add(b); adj.get(b)!.add(a)
     }
   }
+
+  // Ensure all vertices have entries even if they have no interior edges
+  for (let i = 0; i < mesh.vertices.length; i++) {
+    if (mesh.vertices[i] && !adj.has(i)) adj.set(i, new Set())
+  }
+
   return adj
 }
 
