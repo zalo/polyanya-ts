@@ -635,13 +635,13 @@ function buildFinalPath(
       while (diff > Math.PI) diff -= 2 * Math.PI
       while (diff < -Math.PI) diff += 2 * Math.PI
 
-      // Pick the shorter arc (always less than π)
-      // The winding is determined by the turn direction at this vertex
+      // The arc should go the SHORT way around the circle.
+      // turnSign tells us which direction (CW/CCW) is the short way.
       const prev = path[i]!, cur = path[i + 1]!, next = path[i + 2]!
       const turnSign = windSign(prev.rx, prev.ry, next.rx, next.ry, cur.rx, cur.ry)
-      if (turnSign > 0 && diff < 0) diff += 2 * Math.PI
-      if (turnSign < 0 && diff > 0) diff -= 2 * Math.PI
-      if (turnSign === 0) diff = 0 // collinear, no arc needed
+      if (turnSign > 0 && diff > 0) diff -= 2 * Math.PI  // CCW turn → arc goes CW (negative diff)
+      if (turnSign < 0 && diff < 0) diff += 2 * Math.PI  // CW turn → arc goes CCW (positive diff)
+      if (turnSign === 0) diff = 0
 
       // Clamp to prevent full loops
       if (Math.abs(diff) > Math.PI * 1.8) diff = Math.sign(diff) * Math.PI * 1.8
