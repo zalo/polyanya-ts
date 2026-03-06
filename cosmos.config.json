@@ -4,7 +4,7 @@
   "ui": {
     "router": {
       "initialFixtureId": {
-        "path": "fixtures/demo.fixture.tsx"
+        "path": "fixtures/pcb-routing.fixture.tsx"
       }
     }
   }
