@@ -566,12 +566,18 @@ function buildFinalPath(
 ): { points: Point[]; arcs: { centre: Point; radius: number }[] } {
   if (path.length < 2) return { points: path.map(r => r.vertex), arcs: [] }
 
-  const r = traceClearance + traceWidth * 0.5
+  const baseR = traceClearance + traceWidth * 0.5
 
-  // Compute radius for each path vertex
+  // Compute radius for each path vertex.
+  // Use the region's accumulated radius (grows each time a trace attaches)
+  // plus the base clearance for this trace. This makes traces at shared
+  // corners progressively expand outward.
   const radii = path.map(reg => {
     const v = mesh.vertices[reg.vertexIdx]
-    return (v?.isCorner && reg !== path[0] && reg !== path[path.length - 1]) ? r : 0
+    if (!v?.isCorner || reg === path[0] || reg === path[path.length - 1]) return 0
+    // Region radius already includes previous traces' widths + clearances.
+    // Add this trace's clearance on top.
+    return reg.radius + baseR
   })
 
   // Compute tangent segments for each consecutive pair
@@ -713,9 +719,20 @@ export function routeTraces(mesh: Mesh, traces: Trace[], clearance = 0): TraceRo
     const initialPath = regionPath.map(r => r.vertex)
     const initialVertexPath = regionPath.map(r => r.vertexIdx)
 
-    // String-pull: tighten the topological path against obstacles + other traces
+    // Build clearance circles from all obstacle corner regions
+    // (uses accumulated radius which grows with each attached trace)
+    const baseR = traceClearance + traceWidth * 0.5
+    const clearanceCircles: ClearanceCircle[] = []
+    for (const reg of regions) {
+      const v = mesh.vertices[reg.vertexIdx]
+      if (!v?.isCorner) continue
+      const r = reg.radius + baseR
+      if (r > 1e-6) clearanceCircles.push({ centre: v.p, radius: r })
+    }
+
+    // String-pull: tighten the topological path against obstacles + other traces + clearance circles
     const otherPaths = results.map(r => r.rubberbandPath).filter(p => p.length >= 2)
-    const pulled = stringPull(initialPath, obstacleEdges, otherPaths, obstacleCorners)
+    const pulled = stringPull(initialPath, obstacleEdges, otherPaths, obstacleCorners, clearanceCircles)
 
     // Rebuild the region path to match the pulled vertices (for arc computation)
     // Map pulled points back to regions
@@ -775,16 +792,19 @@ function collectObstacleEdges(mesh: Mesh): Segment[] {
   return edges
 }
 
+/** A clearance circle at an obstacle corner */
+interface ClearanceCircle { centre: Point; radius: number }
+
 /**
  * String-pull: greedily skip vertices when the shortcut doesn't cross
- * any obstacle edge, doesn't graze any obstacle corner, and doesn't
- * cross any other trace.
+ * any obstacle edge, any clearance circle, or any other trace.
  */
 function stringPull(
   path: Point[],
   obstacleEdges: Segment[],
   otherTraces: Point[][],
-  obstacleCorners: Point[],
+  _obstacleCorners: Point[],
+  clearanceCircles: ClearanceCircle[] = [],
 ): Point[] {
   if (path.length <= 2) return [...path]
   const result: Point[] = [path[0]!]
@@ -792,7 +812,7 @@ function stringPull(
   while (current < path.length - 1) {
     let farthest = current + 1
     for (let target = path.length - 1; target > current + 1; target--) {
-      if (hasLineOfSight(path[current]!, path[target]!, obstacleEdges, otherTraces, obstacleCorners)) {
+      if (hasLineOfSight(path[current]!, path[target]!, obstacleEdges, otherTraces, clearanceCircles)) {
         farthest = target
         break
       }
@@ -804,25 +824,62 @@ function stringPull(
 }
 
 /**
- * Line-of-sight: blocked only if the segment properly crosses an obstacle
- * edge or another trace segment. The obstacle edge crossing check is
- * sufficient — clearance arcs handle corner offset separately.
+ * Line-of-sight: blocked if the segment crosses an obstacle edge,
+ * penetrates a clearance circle, or crosses another trace.
+ *
+ * The clearance circle check prevents the string-pull from snapping
+ * to obstacle corners — the pulled path must stay outside the
+ * clearance radius of every corner vertex.
  */
 function hasLineOfSight(
   from: Point, to: Point,
   obstacleEdges: Segment[],
   otherTraces: Point[][],
-  _obstacleCorners: Point[],
+  clearanceCircles: ClearanceCircle[],
 ): boolean {
+  // Check obstacle edges
   for (const edge of obstacleEdges) {
     if (segmentsProperlyIntersect(from, to, edge.a, edge.b)) return false
   }
+  // Check clearance circles — segment must not enter any circle
+  // (unless the segment starts or ends at that circle's centre)
+  for (const cc of clearanceCircles) {
+    if (cc.radius < 1e-6) continue
+    // Skip circles centred at from or to (endpoints are allowed to touch)
+    const dFrom = Math.hypot(cc.centre.x - from.x, cc.centre.y - from.y)
+    const dTo = Math.hypot(cc.centre.x - to.x, cc.centre.y - to.y)
+    if (dFrom < 1e-4 || dTo < 1e-4) continue
+    // Check if segment comes within radius of circle centre
+    if (segmentIntersectsCircle(from, to, cc.centre, cc.radius)) return false
+  }
+  // Check other traces
   for (const trace of otherTraces) {
     for (let i = 0; i < trace.length - 1; i++) {
       if (segmentsProperlyIntersect(from, to, trace[i]!, trace[i + 1]!)) return false
     }
   }
   return true
+}
+
+/**
+ * Check if a line segment comes within `radius` of a point.
+ * Returns true if the closest point on segment (from,to) to `centre`
+ * is less than `radius`.
+ */
+function segmentIntersectsCircle(from: Point, to: Point, centre: Point, radius: number): boolean {
+  const dx = to.x - from.x, dy = to.y - from.y
+  const fx = from.x - centre.x, fy = from.y - centre.y
+  const a = dx * dx + dy * dy
+  if (a < 1e-12) return (fx * fx + fy * fy) < radius * radius
+  const b = 2 * (fx * dx + fy * dy)
+  const c = fx * fx + fy * fy - radius * radius
+  let discriminant = b * b - 4 * a * c
+  if (discriminant < 0) return false
+  discriminant = Math.sqrt(discriminant)
+  const t1 = (-b - discriminant) / (2 * a)
+  const t2 = (-b + discriminant) / (2 * a)
+  // Segment intersects circle if either intersection parameter is in [0,1]
+  return (t1 >= 0 && t1 <= 1) || (t2 >= 0 && t2 <= 1) || (t1 < 0 && t2 > 1)
 }
 
 function segmentsProperlyIntersect(a1: Point, a2: Point, b1: Point, b2: Point): boolean {
