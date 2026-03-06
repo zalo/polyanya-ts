@@ -13,7 +13,7 @@
   "type": "module",
   "scripts": {
     "start": "cosmos",
-    "build": "tsup --dts --format esm ./lib/index.ts",
+    "build": "tsup --dts --format esm --tsconfig tsconfig.build.json ./lib/index.ts",
     "build:site": "cosmos-export",
     "format:check": "biome format .",
     "format": "biome format --write .",

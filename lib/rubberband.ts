@@ -673,6 +673,12 @@ export function routeTraces(mesh: Mesh, traces: Trace[], clearance = 0): TraceRo
 
   const { regions, regionByVertex, cuts } = buildRegionGraph(mesh, defaultRadius, traceClearance)
 
+  // Precompute obstacle edges for string-pulling
+  const obstacleEdges = collectObstacleEdges(mesh)
+  const obstacleCorners: Point[] = mesh.vertices
+    .filter((v): v is NonNullable<typeof v> => !!v && v.isCorner)
+    .map(v => v.p)
+
   const results: TraceRoute[] = []
 
   for (const trace of traces) {
@@ -689,7 +695,7 @@ export function routeTraces(mesh: Mesh, traces: Trace[], clearance = 0): TraceRo
       continue
     }
 
-    // Dijkstra on regions
+    // Dijkstra on regions — establishes topology
     const regionPath = dijkstraRegions(startRegion, endVi, traceWidth, traceClearance, cuts)
 
     if (!regionPath || regionPath.length < 2) {
@@ -703,8 +709,27 @@ export function routeTraces(mesh: Mesh, traces: Trace[], clearance = 0): TraceRo
     const initialPath = regionPath.map(r => r.vertex)
     const initialVertexPath = regionPath.map(r => r.vertexIdx)
 
-    // Build final geometry with tangent lines
-    const { points: rubberbandPath, arcs } = buildFinalPath(mesh, regionPath, traceWidth, traceClearance)
+    // String-pull: tighten the topological path against obstacles + other traces
+    const otherPaths = results.map(r => r.rubberbandPath).filter(p => p.length >= 2)
+    const pulled = stringPull(initialPath, obstacleEdges, otherPaths, obstacleCorners)
+
+    // Rebuild the region path to match the pulled vertices (for arc computation)
+    // Map pulled points back to regions
+    const pulledRegions: Region[] = []
+    for (const p of pulled) {
+      // Find the region closest to this point
+      let bestR = regionPath[0]!, bestD = Infinity
+      for (const r of regionPath) {
+        const d = distance(p, r.vertex)
+        if (d < bestD) { bestD = d; bestR = r }
+      }
+      if (pulledRegions.length === 0 || pulledRegions[pulledRegions.length - 1] !== bestR) {
+        pulledRegions.push(bestR)
+      }
+    }
+
+    // Build final geometry with tangent arcs at obstacle corners
+    const { points: rubberbandPath, arcs } = buildFinalPath(mesh, pulledRegions, traceWidth, traceClearance)
 
     // Split regions along path for future traces
     splitRegionsAlongPath(regionPath, regions, regionByVertex, cuts, traceWidth, traceClearance)
@@ -721,7 +746,102 @@ export function routeTraces(mesh: Mesh, traces: Trace[], clearance = 0): TraceRo
 }
 
 // ---------------------------------------------------------------------------
-// Helpers (unchanged from previous version)
+// Obstacle edges + String-pulling
+// ---------------------------------------------------------------------------
+
+interface Segment { a: Point; b: Point }
+
+function collectObstacleEdges(mesh: Mesh): Segment[] {
+  const edges: Segment[] = []
+  const seen = new Set<string>()
+  for (const poly of mesh.polygons) {
+    if (!poly) continue
+    const V = poly.vertices
+    for (let i = 0; i < V.length; i++) {
+      const i2 = (i + 1) % V.length
+      const adj = poly.polygons[i2]!
+      if (adj !== -1) continue
+      const va = V[i]!, vb = V[i2]!
+      const key = va < vb ? `${va},${vb}` : `${vb},${va}`
+      if (seen.has(key)) continue
+      seen.add(key)
+      edges.push({ a: mesh.vertices[va]!.p, b: mesh.vertices[vb]!.p })
+    }
+  }
+  return edges
+}
+
+/**
+ * String-pull: greedily skip vertices when the shortcut doesn't cross
+ * any obstacle edge, doesn't graze any obstacle corner, and doesn't
+ * cross any other trace.
+ */
+function stringPull(
+  path: Point[],
+  obstacleEdges: Segment[],
+  otherTraces: Point[][],
+  obstacleCorners: Point[],
+): Point[] {
+  if (path.length <= 2) return [...path]
+  const result: Point[] = [path[0]!]
+  let current = 0
+  while (current < path.length - 1) {
+    let farthest = current + 1
+    for (let target = path.length - 1; target > current + 1; target--) {
+      if (hasLineOfSight(path[current]!, path[target]!, obstacleEdges, otherTraces, obstacleCorners)) {
+        farthest = target
+        break
+      }
+    }
+    result.push(path[farthest]!)
+    current = farthest
+  }
+  return result
+}
+
+function hasLineOfSight(
+  from: Point, to: Point,
+  obstacleEdges: Segment[],
+  otherTraces: Point[][],
+  obstacleCorners: Point[],
+): boolean {
+  for (const edge of obstacleEdges) {
+    if (segmentsProperlyIntersect(from, to, edge.a, edge.b)) return false
+  }
+  for (const c of obstacleCorners) {
+    if ((Math.abs(c.x - from.x) < 1e-4 && Math.abs(c.y - from.y) < 1e-4) ||
+        (Math.abs(c.x - to.x) < 1e-4 && Math.abs(c.y - to.y) < 1e-4)) continue
+    if (pointToSegmentDist(c, from, to) < 0.5) return false
+  }
+  for (const trace of otherTraces) {
+    for (let i = 0; i < trace.length - 1; i++) {
+      if (segmentsProperlyIntersect(from, to, trace[i]!, trace[i + 1]!)) return false
+    }
+  }
+  return true
+}
+
+function segmentsProperlyIntersect(a1: Point, a2: Point, b1: Point, b2: Point): boolean {
+  const d1 = triArea2(a1, a2, b1), d2 = triArea2(a1, a2, b2)
+  const d3 = triArea2(b1, b2, a1), d4 = triArea2(b1, b2, a2)
+  return ((d1 > 1e-10 && d2 < -1e-10) || (d1 < -1e-10 && d2 > 1e-10)) &&
+         ((d3 > 1e-10 && d4 < -1e-10) || (d3 < -1e-10 && d4 > 1e-10))
+}
+
+function pointToSegmentDist(p: Point, a: Point, b: Point): number {
+  const dx = b.x - a.x, dy = b.y - a.y
+  const lenSq = dx * dx + dy * dy
+  if (lenSq < 1e-12) return distance(p, a)
+  const t = Math.max(0, Math.min(1, ((p.x - a.x) * dx + (p.y - a.y) * dy) / lenSq))
+  return distance(p, { x: a.x + t * dx, y: a.y + t * dy })
+}
+
+function triArea2(a: Point, b: Point, c: Point): number {
+  return (b.x - a.x) * (c.y - a.y) - (b.y - a.y) * (c.x - a.x)
+}
+
+// ---------------------------------------------------------------------------
+// Helpers
 // ---------------------------------------------------------------------------
 
 function findNearestVertex(mesh: Mesh, p: Point): number {
