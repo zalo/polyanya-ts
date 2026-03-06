@@ -81,9 +81,15 @@ function pathLen(pts: Point[]) {
 function buildMesh(obstacles: Obstacle[], traces: TraceState[], clearance: number) {
   try {
     const obstaclePolygons = obstacles.map((o) => obstacleToPolygon(o, clearance))
+    // Collect all trace start/end points as Steiner points for the CDT
+    const steinerPoints: Point[] = []
+    for (const t of traces) {
+      steinerPoints.push(t.start, t.end)
+    }
     const result = cdtTriangulate({
       bounds: BOUNDS,
       obstacles: obstaclePolygons,
+      steinerPoints,
     })
     const mesh = buildMeshFromRegions({ regions: result.regions })
     return mesh
@@ -408,7 +414,7 @@ export default function PcbRoutingPlayground() {
             onChange={setShowTriangulation}
           />
           <Toggle
-            label="Initial paths (Polyanya)"
+            label="Initial paths (A* on edges)"
             checked={showInitialPaths}
             onChange={setShowInitialPaths}
           />
@@ -470,7 +476,7 @@ export default function PcbRoutingPlayground() {
           <Legend color="#f72585" label="Trace end" />
           <Legend color="#4a4e69" label="Triangulation edges" />
           <Legend color="#e94560" label="Obstacles / Boundary" />
-          <Legend color="#f8961e" label="Initial path (Polyanya)" />
+          <Legend color="#f8961e" label="Initial path (A* on CDT edges)" />
           <Legend color="#06d6a0" label="Rubberband path" />
           <Legend color="#4361ee33" label="Triangle corridor" />
         </div>
@@ -513,11 +519,11 @@ export default function PcbRoutingPlayground() {
         <div style={{ ...cardStyle, fontSize: 11, color: "#8d99ae", lineHeight: 1.5 }}>
           <div style={{ ...cardTitle, color: "#8d99ae" }}>Algorithm</div>
           <ol style={{ margin: 0, paddingLeft: 16 }}>
-            <li>Build CDT with obstacles as constraints</li>
-            <li>Add trace endpoints to the mesh</li>
-            <li>Find initial path via Polyanya search</li>
-            <li>Extract triangle corridor along path</li>
-            <li>Funnel algorithm optimizes path within corridor (rubberband)</li>
+            <li>Build CDT with obstacles + trace endpoints as vertices</li>
+            <li>A* on CDT edges finds initial vertex-to-vertex path</li>
+            <li>Corridor = triangles adjacent to traversed edges</li>
+            <li>Read crossing order at shared portals from geometry</li>
+            <li>Funnel algorithm optimizes within corridor (rubberband)</li>
           </ol>
         </div>
       </div>

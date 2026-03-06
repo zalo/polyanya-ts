@@ -25,8 +25,10 @@ export function cdtTriangulate(input: {
   bounds: { minX: number; maxX: number; minY: number; maxY: number }
   obstacles: Point[][]
   weightedRegions?: WeightedRegion[]
+  /** Extra unconstrained Steiner points to insert into the CDT (e.g. trace endpoints) */
+  steinerPoints?: Point[]
 }): CdtResult {
-  const { bounds, obstacles, weightedRegions } = input
+  const { bounds, obstacles, weightedRegions, steinerPoints } = input
   const { minX, maxX, minY, maxY } = bounds
 
   const pts: [number, number][] = []
@@ -127,6 +129,18 @@ export function cdtTriangulate(input: {
     if (wr.polygon.length < 3) continue
     for (let i = 0; i < wr.polygon.length; i++) {
       const p = wr.polygon[i]!
+      pts.push([
+        p.x + ((i % 7) - 3) * 1e-8,
+        p.y + ((i % 5) - 2) * 1e-8,
+      ])
+    }
+  }
+
+  // --- Steiner points (e.g. trace endpoints) ---
+  // Added as unconstrained vertices so the CDT includes them as triangle vertices.
+  if (steinerPoints) {
+    for (let i = 0; i < steinerPoints.length; i++) {
+      const p = steinerPoints[i]!
       pts.push([
         p.x + ((i % 7) - 3) * 1e-8,
         p.y + ((i % 5) - 2) * 1e-8,
