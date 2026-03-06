@@ -582,17 +582,19 @@ function buildFinalPath(
     const a = path[i]!, b = path[i + 1]!
     const ra = radii[i]!, rb = radii[i + 1]!
 
-    // Determine tangent side from path winding at each vertex
-    // At vertex a: which side of the path are we on?
+    // Determine tangent side: the trace must go around the EXTERIOR
+    // of obstacle corners. The tangent side is the opposite of the
+    // turn direction — if the path turns left at a vertex, the tangent
+    // touches the RIGHT side of the circle (exterior).
     let leftA = false
     if (i > 0) {
       const prev = path[i - 1]!
-      leftA = windSign(prev.rx, prev.ry, b.rx, b.ry, a.rx, a.ry) > 0
+      leftA = windSign(prev.rx, prev.ry, b.rx, b.ry, a.rx, a.ry) <= 0
     }
     let leftB = false
     if (i + 2 < path.length) {
       const next = path[i + 2]!
-      leftB = windSign(a.rx, a.ry, next.rx, next.ry, b.rx, b.ry) > 0
+      leftB = windSign(a.rx, a.ry, next.rx, next.ry, b.rx, b.ry) <= 0
     }
 
     if (ra < 1e-6 && rb < 1e-6) {
