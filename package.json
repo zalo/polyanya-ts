@@ -41,6 +41,7 @@
   },
   "dependencies": {
     "@flatten-js/core": "^1.6.10",
-    "cdt2d": "^1.0.0"
+    "cdt2d": "^1.0.0",
+    "robust-predicates": "^3.0.2"
   }
 }

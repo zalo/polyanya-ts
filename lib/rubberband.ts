@@ -27,6 +27,7 @@
 import type { Point } from "./types.ts"
 import type { Mesh } from "./mesh.ts"
 import { distance } from "./geometry.ts"
+import { orient2d } from "robust-predicates"
 
 // ---------------------------------------------------------------------------
 // Public types
@@ -180,13 +181,15 @@ function getTangents(
 // Cross product / winding
 // ---------------------------------------------------------------------------
 
+/** Exact: is the turn o→a→b a left turn? Uses robust orient2d. */
 function wind(ax: number, ay: number, bx: number, by: number, ox: number, oy: number): boolean {
-  return (ax - ox) * (by - oy) > (ay - oy) * (bx - ox)
+  return orient2d(ox, oy, ax, ay, bx, by) > 0
 }
 
+/** Exact: sign of the turn o→a→b. +1=CCW, -1=CW, 0=collinear. */
 function windSign(ax: number, ay: number, bx: number, by: number, ox: number, oy: number): number {
-  const v = (ax - ox) * (by - oy) - (ay - oy) * (bx - ox)
-  return v > 1e-10 ? 1 : v < -1e-10 ? -1 : 0
+  const v = orient2d(ox, oy, ax, ay, bx, by)
+  return v > 0 ? 1 : v < 0 ? -1 : 0
 }
 
 // ---------------------------------------------------------------------------
@@ -581,8 +584,11 @@ function buildFinalPath(
     return reg.radius + baseR
   })
 
-  // Compute tangent segments for each consecutive pair
-  interface TangentSeg { x1: number; y1: number; x2: number; y2: number; leftA: boolean; leftB: boolean }
+  // Compute tangent segments for each consecutive pair.
+  // For each segment, try both outer tangent options and pick the
+  // SHORTER one that doesn't cross any obstacle edge. The shorter
+  // tangent is always the exterior one (going around the outside).
+  interface TangentSeg { x1: number; y1: number; x2: number; y2: number }
   const tangents: TangentSeg[] = []
 
   for (let i = 0; i < path.length - 1; i++) {
@@ -590,48 +596,47 @@ function buildFinalPath(
     const ra = radii[i]!, rb = radii[i + 1]!
 
     if (ra < 1e-6 && rb < 1e-6) {
-      tangents.push({ x1: a.rx, y1: a.ry, x2: b.rx, y2: b.ry, leftA: false, leftB: false })
+      tangents.push({ x1: a.rx, y1: a.ry, x2: b.rx, y2: b.ry })
     } else {
-      // Try all 4 tangent side combinations and pick the one that
-      // doesn't cross any obstacle edge. This is the only reliable
-      // way to determine which side is "exterior".
-      let bestTangent: [number, number, number, number] | null = null
-      let bestLA = false, bestLB = false
+      // Compute both outer tangents (l1===l2) and pick the one that
+      // is shorter AND doesn't cross obstacle edges. The shorter
+      // outer tangent is the exterior one.
+      const tA = getTangents(a.rx, a.ry, ra, false, b.rx, b.ry, rb, false)
+      const tB = getTangents(a.rx, a.ry, ra, true, b.rx, b.ry, rb, true)
 
-      for (const la of [false, true]) {
-        for (const lb of [false, true]) {
-          const t = getTangents(a.rx, a.ry, ra, la, b.rx, b.ry, rb, lb)
-          // Check if this tangent line crosses any obstacle edge
-          let crosses = false
-          for (const edge of obstacleEdges) {
-            if (segmentsProperlyIntersect(
-              { x: t[0], y: t[1] }, { x: t[2], y: t[3] },
-              edge.a, edge.b,
-            )) {
-              crosses = true
-              break
-            }
-          }
-          if (!crosses) {
-            bestTangent = t
-            bestLA = la
-            bestLB = lb
-            break
-          }
+      const lenA = Math.hypot(tA[2] - tA[0], tA[3] - tA[1])
+      const lenB = Math.hypot(tB[2] - tB[0], tB[3] - tB[1])
+
+      // Check which tangent crosses obstacle edges
+      let crossesA = false, crossesB = false
+      for (const edge of obstacleEdges) {
+        if (!crossesA && segmentsProperlyIntersect({ x: tA[0], y: tA[1] }, { x: tA[2], y: tA[3] }, edge.a, edge.b)) crossesA = true
+        if (!crossesB && segmentsProperlyIntersect({ x: tB[0], y: tB[1] }, { x: tB[2], y: tB[3] }, edge.a, edge.b)) crossesB = true
+        if (crossesA && crossesB) break
+      }
+
+      let best: [number, number, number, number]
+      if (!crossesA && !crossesB) {
+        best = lenA <= lenB ? tA : tB // both valid, pick shorter
+      } else if (!crossesA) {
+        best = tA
+      } else if (!crossesB) {
+        best = tB
+      } else {
+        // Both cross — try inner tangents as fallback
+        const tC = getTangents(a.rx, a.ry, ra, false, b.rx, b.ry, rb, true)
+        const tD = getTangents(a.rx, a.ry, ra, true, b.rx, b.ry, rb, false)
+        let crossesC = false, crossesD = false
+        for (const edge of obstacleEdges) {
+          if (!crossesC && segmentsProperlyIntersect({ x: tC[0], y: tC[1] }, { x: tC[2], y: tC[3] }, edge.a, edge.b)) crossesC = true
+          if (!crossesD && segmentsProperlyIntersect({ x: tD[0], y: tD[1] }, { x: tD[2], y: tD[3] }, edge.a, edge.b)) crossesD = true
         }
-        if (bestTangent) break
+        if (!crossesC) best = tC
+        else if (!crossesD) best = tD
+        else best = tA // all cross, just pick one
       }
 
-      if (!bestTangent) {
-        // All tangents cross an obstacle — fall back to straight line
-        bestTangent = getTangents(a.rx, a.ry, ra, false, b.rx, b.ry, rb, false)
-      }
-
-      tangents.push({
-        x1: bestTangent[0], y1: bestTangent[1],
-        x2: bestTangent[2], y2: bestTangent[3],
-        leftA: bestLA, leftB: bestLB,
-      })
+      tangents.push({ x1: best[0], y1: best[1], x2: best[2], y2: best[3] })
     }
   }
 
@@ -894,11 +899,17 @@ function segmentIntersectsCircle(from: Point, to: Point, centre: Point, radius: 
   return (t1 >= 0 && t1 <= 1) || (t2 >= 0 && t2 <= 1) || (t1 < 0 && t2 > 1)
 }
 
+/**
+ * Exact segment intersection using robust orient2d predicates.
+ * Returns true only for proper crossings (strict straddle on both sides).
+ */
 function segmentsProperlyIntersect(a1: Point, a2: Point, b1: Point, b2: Point): boolean {
-  const d1 = triArea2(a1, a2, b1), d2 = triArea2(a1, a2, b2)
-  const d3 = triArea2(b1, b2, a1), d4 = triArea2(b1, b2, a2)
-  return ((d1 > 1e-10 && d2 < -1e-10) || (d1 < -1e-10 && d2 > 1e-10)) &&
-         ((d3 > 1e-10 && d4 < -1e-10) || (d3 < -1e-10 && d4 > 1e-10))
+  const d1 = orient2d(a1.x, a1.y, a2.x, a2.y, b1.x, b1.y)
+  const d2 = orient2d(a1.x, a1.y, a2.x, a2.y, b2.x, b2.y)
+  const d3 = orient2d(b1.x, b1.y, b2.x, b2.y, a1.x, a1.y)
+  const d4 = orient2d(b1.x, b1.y, b2.x, b2.y, a2.x, a2.y)
+  return ((d1 > 0 && d2 < 0) || (d1 < 0 && d2 > 0)) &&
+         ((d3 > 0 && d4 < 0) || (d3 < 0 && d4 > 0))
 }
 
 function pointToSegmentDist(p: Point, a: Point, b: Point): number {
