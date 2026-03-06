@@ -1,0 +1,9 @@
+
+cd old_pics
+bash gen_pics
+cd -
+cd new_pics
+bash gen_pics
+cd -
+diff --exclude=router.rb* new_pics/ old_pics/
+

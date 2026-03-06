@@ -1,0 +1,271 @@
+// file: rcgal_apollonius.cpp
+// note: source code is indented with tabs, tab-width=2
+
+// Ruby bindings for CGAL C++ library, basic support for
+// Apollonius Graph (Convex hull of discs/circles)
+// http://www.cgal.org/
+// http://www.cgal.org/Manual/latest/doc_html/cgal_manual/Apollonius_graph_2/Chapter_main.html
+// http://media.pragprog.com/titles/ruby3/ext_ruby.pdf
+// /usr/share/doc/ruby-2.0.0_p247-r1/README.EXT.bz2
+// http://www.angelfire.com/electronic2/issac/rb_cpp_ext_tut.txt
+//
+// c Stefan Salewsk, mail@ssalewski.de
+// License GPL
+// Version 0.1 11-OCT-2013
+// tested for Ruby 1.9.3 and Ruby 2.0 -- not much yet
+
+#include <ruby.h>
+//#include "/usr/include/ruby-2.0.0/ruby/intern.h"
+#include <CGAL/MP_Float.h>
+typedef CGAL::MP_Float NT;
+
+#include <CGAL/Simple_cartesian.h>
+typedef CGAL::Simple_cartesian<NT> Kernel;
+#include <CGAL/Apollonius_graph_2.h>
+#include <CGAL/Apollonius_graph_traits_2.h>
+typedef CGAL::Apollonius_graph_traits_2<Kernel> Traits;
+typedef CGAL::Apollonius_graph_2<Traits> Apollonius_graph;
+#include <CGAL/Apollonius_site_2.h>
+typedef Apollonius_graph::Vertex_handle VH;
+typedef Apollonius_graph::Site_2 Site;
+typedef Site::Point_2 Point;
+
+class AG : public Apollonius_graph
+{
+public:
+	VALUE coord_hash; // supported by Ruby hash -- map coordinates tripel to Ruby object
+	VALUE vh_hash; // supported by Ruby hash -- map Ruby object to vertex_handle (delete operation)
+};
+
+static VALUE cAG;
+static VALUE cVH;
+
+static void ag_del(void* t)
+{
+	delete (AG*) t;
+}
+
+static void ag_mark(void *p)
+{
+	AG *ag = (AG*) p;
+	rb_gc_mark(ag->coord_hash);
+	rb_gc_mark(ag->vh_hash);
+}
+
+static VALUE ag_alloc(VALUE klass)
+{
+	//AG *ag = new AG;
+	//AG *ag = new AG;
+	int  *pi = nullptr; // testing c++11 feature
+	AG *ag = new AG;
+	//AG *ag = new (std::nothrow) AG;
+	//if (ag == NULL)
+	//	rb_gc_start();
+	//rb_raise(rb_eRuntimeError, "access from outside");
+	//fprintf(stderr, "[FATAL] failed to allocate memory\n");
+	//exit(EXIT_FAILURE);
+	return Data_Wrap_Struct(klass, ag_mark, ag_del, ag);
+}
+
+static VALUE ag_init(int argc, VALUE* argv, VALUE self)
+{
+	AG *ag;
+	Data_Get_Struct(self, AG, ag);
+	ag->coord_hash = rb_hash_new();
+	ag->vh_hash = rb_hash_new();
+	return self;
+}
+
+extern "C" void vh_del(void* p)
+{
+	delete (VH*) p;
+}
+
+static VALUE ag_insert(VALUE self, VALUE obj, VALUE x, VALUE y, VALUE r)
+{
+	AG *ag;
+	Data_Get_Struct(self, AG, ag);
+	if (NIL_P(rb_hash_aref(ag->vh_hash, obj)))
+	{
+		VH *vh = new VH;
+		double xx = NUM2DBL(x);
+		double yy = NUM2DBL(y);
+		double rr = NUM2DBL(r);
+		*vh = ag->insert(Site(Point(xx, yy), rr));
+		VALUE h = Data_Wrap_Struct(cVH, 0, vh_del, vh);
+		rb_hash_aset(ag->vh_hash, obj, h);
+		if (TYPE(x) != T_FLOAT)
+			x = rb_float_new(xx);
+		if (TYPE(y) != T_FLOAT)
+			y = rb_float_new(yy);
+		if (TYPE(r) != T_FLOAT)
+			r = rb_float_new(rr);
+		rb_hash_aset(ag->coord_hash, rb_ary_new3(3, x, y, r), obj);
+	}
+	else
+		rb_raise(rb_eRuntimeError, "object is already inserted!");
+	return Qnil;
+}
+
+static VALUE ag_clear(VALUE self)
+{
+	AG *ag;
+	Data_Get_Struct(self, AG, ag);
+	ag->clear();
+	//rb_hash_clear(ag->coord_hash); not available for ruby 1.9
+	ag->coord_hash = rb_hash_new(); // so use a new empty hash
+	ag->vh_hash = rb_hash_new();
+}
+
+static VALUE ag_convex_hull_each(VALUE self)
+{
+	if (!rb_block_given_p())
+		rb_raise(rb_eArgError, "block expected!");
+	AG *ag;
+	Data_Get_Struct(self, AG, ag);
+	Apollonius_graph::size_type num_sites = ag->number_of_visible_sites();
+  if (num_sites == 0)
+		rb_yield(Qnil);
+	else if (num_sites == 1)
+	{
+		Site s = ag->finite_vertex()->site();
+		Point p = s.point();
+		double w = CGAL::to_double(s.weight());
+		double x = CGAL::to_double(p.x());
+		double y = CGAL::to_double(p.y());
+		VALUE obj = rb_hash_aref(ag->coord_hash, rb_ary_new3(3, rb_float_new(x), rb_float_new(y), rb_float_new(w)));
+		rb_yield(obj);
+	}
+	else
+	{
+		AG::Vertex_circulator cv, cv0;
+		cv = cv0 = ag->incident_vertices(ag->infinite_vertex());
+		do
+		{
+			++cv;
+			Site s =  cv->site();
+			Point p = s.point();
+			double w = CGAL::to_double(s.weight());
+			double x = CGAL::to_double(p.x());
+			double y = CGAL::to_double(p.y());
+			rb_yield(rb_hash_aref(ag->coord_hash, rb_ary_new3(3, rb_float_new(x), rb_float_new(y), rb_float_new(w))));
+			//rb_yield(obj);
+		} while (cv != cv0);
+	}
+	return Qnil;
+}
+
+//static VALUE ag_convex_hull_size(VALUE self);
+
+typedef VALUE (ruby_method)(...);
+
+
+static VALUE ag_convex_hull_size(VALUE self)
+{
+	AG *ag;
+	Data_Get_Struct(self, AG, ag);
+	Apollonius_graph::size_type num_sites = ag->number_of_visible_sites();
+	return INT2NUM(num_sites);
+	//return Qnil;
+}
+
+
+static VALUE ag_convex_hull_enum(VALUE self)
+{
+	//RETURN_SIZED_ENUMERATOR(self, 0, 0, 0);
+
+	//RETURN_SIZED_ENUMERATOR(self, 0, 0, (ruby_method*) &ag_convex_hull_size);
+	RETURN_ENUMERATOR(self, 0, 0);
+
+//	if (!rb_block_given_p())
+//		rb_raise(rb_eArgError, "block expected!");
+	AG *ag;
+	Data_Get_Struct(self, AG, ag);
+	Apollonius_graph::size_type num_sites = ag->number_of_visible_sites();
+//VALUE n; // = INT2FIX(num_sites);
+  if (num_sites == 0)
+		rb_yield(Qnil);
+	else if (num_sites == 1)
+	{
+		Site s = ag->finite_vertex()->site();
+		Point p = s.point();
+		double w = CGAL::to_double(s.weight());
+		double x = CGAL::to_double(p.x());
+		double y = CGAL::to_double(p.y());
+		VALUE obj = rb_hash_aref(ag->coord_hash, rb_ary_new3(3, rb_float_new(x), rb_float_new(y), rb_float_new(w)));
+		rb_yield(obj);
+	}
+	else
+	{
+		AG::Vertex_circulator cv, cv0;
+		cv = cv0 = ag->incident_vertices(ag->infinite_vertex());
+		do
+		{
+			++cv;
+			Site s =  cv->site();
+			Point p = s.point();
+			double w = CGAL::to_double(s.weight());
+			double x = CGAL::to_double(p.x());
+			double y = CGAL::to_double(p.y());
+			rb_yield(rb_hash_aref(ag->coord_hash, rb_ary_new3(3, rb_float_new(x), rb_float_new(y), rb_float_new(w))));
+			//rb_yield(obj);
+		} while (cv != cv0);
+	}
+	return Qnil;
+}
+
+
+
+
+static VALUE ag_convex_hull(VALUE self)
+{
+//	if (!rb_block_given_p())
+//		rb_raise(rb_eArgError, "block expected!");
+	AG *ag;
+	Data_Get_Struct(self, AG, ag);
+	Apollonius_graph::size_type num_sites = ag->number_of_visible_sites();
+	VALUE h = rb_ary_new();
+  //if (num_sites == 0);	
+	if (num_sites == 1)
+	{
+		Site s = ag->finite_vertex()->site();
+		Point p = s.point();
+		double w = CGAL::to_double(s.weight());
+		double x = CGAL::to_double(p.x());
+		double y = CGAL::to_double(p.y());
+		rb_ary_push(h, rb_hash_aref(ag->coord_hash, rb_ary_new3(3, rb_float_new(x), rb_float_new(y), rb_float_new(w))));
+	}
+	else if (num_sites > 1)
+	{
+		AG::Vertex_circulator cv, cv0;
+		cv = cv0 = ag->incident_vertices(ag->infinite_vertex());
+		do
+		{
+			++cv;
+			Site s =  cv->site();
+			Point p = s.point();
+			double w = CGAL::to_double(s.weight());
+			double x = CGAL::to_double(p.x());
+			double y = CGAL::to_double(p.y());
+			rb_ary_push(h, rb_hash_aref(ag->coord_hash, rb_ary_new3(3, rb_float_new(x), rb_float_new(y), rb_float_new(w))));
+		} while (cv != cv0);
+	}
+	return h;
+}
+
+
+//typedef VALUE (ruby_method)(...);
+
+extern "C" void Init_rcgal_apollonius() {
+	VALUE mCGAL = rb_define_module("CGAL");
+	cAG = rb_define_class_under(mCGAL, "Apollonius_graph", rb_cObject);
+	cVH = rb_define_class("Vertex_Handle", rb_cObject);
+	rb_define_alloc_func(cAG, ag_alloc);
+	rb_define_method(cAG, "initialize", (ruby_method*) &ag_init, -1);
+	rb_define_method(cAG, "insert", (ruby_method*) &ag_insert, 4);
+	rb_define_method(cAG, "clear", (ruby_method*) &ag_clear, 0);
+	rb_define_method(cAG, "convex_hull_each", (ruby_method*) &ag_convex_hull_each, 0);
+	rb_define_method(cAG, "convex_hull_enum", (ruby_method*) &ag_convex_hull_enum, 0);
+	rb_define_method(cAG, "convex_hull", (ruby_method*) &ag_convex_hull, 0);
+}
+

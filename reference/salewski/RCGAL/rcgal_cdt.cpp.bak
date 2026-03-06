@@ -1,0 +1,212 @@
+#include "ruby.h"
+
+// file: rcgal_cdt.cpp
+// note: source code is indented with tabs, tab-width=2
+
+// Ruby bindings for CGAL C++ library, some support for
+// CDT Constrained Delaunay Triangulation
+// http://www.cgal.org/
+// http://media.pragprog.com/titles/ruby3/ext_ruby.pdf
+// /usr/share/doc/ruby-1.9.3_p286/README.EXT.bz2
+// http://www.angelfire.com/electronic2/issac/rb_cpp_ext_tut.txt
+//
+// c Stefan Salewsk, mail@ssalewski.de
+// License GPL
+// Version 0.1 05-JAN-2013
+//
+// build: cd RCGAL; ruby extconf.rb; make
+
+#include <CGAL/Exact_predicates_inexact_constructions_kernel.h>
+#include <CGAL/Triangulation_face_base_with_info_2.h>
+#include <CGAL/Triangulation_vertex_base_with_info_2.h>
+#include <CGAL/Constrained_Delaunay_triangulation_2.h>
+//#include <boost/static_assert.hpp>
+//#include <cassert>
+//#include <iostream>
+
+struct MyInfo
+{
+	VALUE rvertex;
+	void *parent;
+	MyInfo():
+		rvertex(Qnil),
+		parent(NULL)
+	{}
+};
+
+typedef CGAL::Exact_predicates_inexact_constructions_kernel K;
+typedef CGAL::Triangulation_vertex_base_with_info_2<MyInfo, K>	 Vb;
+typedef CGAL::Constrained_triangulation_face_base_2<K>					 Fb;
+typedef CGAL::Triangulation_data_structure_2<Vb, Fb>						 TDS;
+typedef CGAL::Exact_predicates_tag															 Itag;
+typedef CGAL::Constrained_Delaunay_triangulation_2<K, TDS, Itag> CDT;
+typedef CDT::Point					Point;
+
+typedef VALUE (ruby_method)(...);
+
+VALUE cCDT;
+VALUE cVertex;
+VALUE cVH;
+
+ID ID_vertex_x;
+ID ID_vertex_y;
+ID ID_vertex_vh;
+ID ID_vertex_cdt;
+
+extern "C" void cdt_del(void* p)
+{
+	CDT *t = (CDT*) p;
+	for (CDT::Finite_vertices_iterator i = t->finite_vertices_begin();
+			 i != t->finite_vertices_end();
+			 ++i)
+	{
+		rb_ivar_set(i->info().rvertex, ID_vertex_vh, Qnil);
+	}
+	delete (CDT*) p;
+}
+
+extern "C" void cdt_mark(void *p)
+{
+	CDT *t = (CDT*) p;
+	for (CDT::Finite_vertices_iterator i = t->finite_vertices_begin();
+			 i != t->finite_vertices_end();
+			 ++i)
+	{
+		rb_gc_mark(i->info().rvertex);
+	}
+}
+
+extern "C" VALUE cdt_alloc(VALUE klass)
+{
+	CDT *t = new CDT;
+	return Data_Wrap_Struct(klass, cdt_mark, cdt_del, t);
+}
+
+extern "C" VALUE cdt_init(VALUE self)
+{
+	return self;
+}
+
+extern "C" VALUE vertex_init(VALUE self, VALUE x, VALUE y)
+{
+	rb_ivar_set(self, ID_vertex_x, x);
+	rb_ivar_set(self, ID_vertex_y, y);
+	rb_ivar_set(self, ID_vertex_cdt, Qnil);
+	return self;
+}
+
+extern "C" VALUE vertex_x(VALUE self)
+{
+	return rb_ivar_get(self, ID_vertex_x);
+}
+
+extern "C" VALUE vertex_y(VALUE self)
+{
+	return rb_ivar_get(self, ID_vertex_y);
+}
+
+extern "C" VALUE cdt_to_a(VALUE self)
+{
+	CDT *t;
+	VALUE arr = rb_ary_new();
+	Data_Get_Struct(self, CDT, t);
+	for (CDT::Finite_vertices_iterator i = t->finite_vertices_begin();
+			 i != t->finite_vertices_end();
+			 ++i)
+	{
+		rb_ary_push(arr, i->info().rvertex);
+	}
+	return arr;
+}
+
+extern "C" VALUE cdt_each(VALUE self)
+{
+	CDT *t;
+	Data_Get_Struct(self, CDT, t);
+	for (CDT::Finite_vertices_iterator i = t->finite_vertices_begin();
+			 i != t->finite_vertices_end();
+			 ++i)
+	{
+		rb_yield(i->info().rvertex);
+	}
+	return self;
+}
+
+extern "C" void vh_del(void* p)
+{
+	delete (CDT::Vertex_handle*) p;
+}
+
+extern "C" VALUE cdt_insert(VALUE self, VALUE vertex)
+{
+	CDT *t;
+	Data_Get_Struct(self, CDT, t);
+	CDT::Vertex_handle *vh = new CDT::Vertex_handle;
+	*vh = t->insert(Point(NUM2DBL(rb_ivar_get(vertex, ID_vertex_x)), NUM2DBL(rb_ivar_get(vertex, ID_vertex_y))));
+	(*vh)->info().rvertex = vertex;
+	(*vh)->info().parent = t;
+	VALUE h = Data_Wrap_Struct(cVH, 0, vh_del, vh);
+	rb_ivar_set(vertex, ID_vertex_vh, h);
+	return self;
+}
+
+// this is for vertices already existing in CDT
+extern "C" VALUE cdt_insert_constraint(VALUE self, VALUE vertex1, VALUE vertex2)
+{
+	CDT *t;
+	CDT::Vertex_handle *h1;
+	CDT::Vertex_handle *h2;
+	Data_Get_Struct(self, CDT, t);
+	VALUE vh1 = rb_attr_get(vertex1, ID_vertex_vh);
+	VALUE vh2 = rb_attr_get(vertex2, ID_vertex_vh);
+	if (NIL_P(vh1) || NIL_P(vh2))
+		rb_raise(rb_eRuntimeError, "CGAL::CDT.insert_constraint(), vertices must already exist in CDT!");
+	Data_Get_Struct(vh1, CDT::Vertex_handle,	h1);
+	Data_Get_Struct(vh2, CDT::Vertex_handle,	h2);
+	t->insert_constraint(*h1, *h2);
+	return self;
+}
+
+extern "C" VALUE cdt_neighbor_vertices(VALUE self, VALUE vertex)
+{
+	CDT *t;
+	CDT::Vertex_handle *vh;
+	Data_Get_Struct(self, CDT, t);
+	VALUE h = rb_attr_get(vertex, ID_vertex_vh);
+	if (NIL_P(h))
+		rb_raise(rb_eRuntimeError, "CGAL::CDT.neighbor_vertices, vertex does not exist in CDT!");
+	Data_Get_Struct(h, CDT::Vertex_handle,	vh);
+	if ((*vh)->info().parent != t)
+		rb_raise(rb_eRuntimeError, "CGAL::CDT.neighbor_vertices, vertex does not exist in THIS CDT!");
+	VALUE arr = rb_ary_new();
+	CDT::Vertex_circulator vc = t->incident_vertices(*vh), done(vc);
+	do
+	{
+		if (!t->is_infinite(vc))
+		{
+			rb_ary_push(arr, vc->info().rvertex);
+		}
+	} while (++vc != done);
+	return arr;
+}
+
+extern "C" void Init_rcgal_cdt() {
+	ID_vertex_x = rb_intern("vertex_x_name");
+	ID_vertex_y = rb_intern("vertex_y_name");
+	ID_vertex_vh = rb_intern("vertex_vh_name");
+	ID_vertex_cdt = rb_intern("vertex_cdt_name");
+	VALUE mCGAL = rb_define_module("CGAL");
+	cCDT = rb_define_class_under(mCGAL, "CDT", rb_cObject);
+	cVertex = rb_define_class_under(mCGAL, "Vertex", rb_cObject);
+	cVH = rb_define_class_under(mCGAL, "VH", rb_cObject);
+	rb_define_alloc_func(cCDT, cdt_alloc);
+	rb_define_method(cCDT, "initialize", (ruby_method*) &cdt_init, 0);
+	rb_define_method(cVertex, "initialize", (ruby_method*) &vertex_init, 2);
+	rb_define_method(cVertex, "x", (ruby_method*) &vertex_x, 0);
+	rb_define_method(cVertex, "y", (ruby_method*) &vertex_y, 0);
+	rb_define_method(cCDT, "insert", (ruby_method*) &cdt_insert, 1);
+	rb_define_method(cCDT, "insert_constraint", (ruby_method*) &cdt_insert_constraint, 2);
+	rb_define_method(cCDT, "neighbor_vertices", (ruby_method*) &cdt_neighbor_vertices, 1);
+	rb_define_method(cCDT, "to_a", (ruby_method*) &cdt_to_a, 0);
+	rb_define_method(cCDT, "each", (ruby_method*) &cdt_each, 0);
+}

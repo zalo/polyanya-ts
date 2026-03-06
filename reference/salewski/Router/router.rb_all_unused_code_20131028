@@ -1,0 +1,3402 @@
+# file: Router.rb
+# note: source code is indented with tabs, tab-width=2
+#
+# A simple rubberband topological router based on the region concept mentioned in
+# Tal Dayan's PhD thesis and other papers. 
+# Currently we use random points as terminals and try to connect pairs of them.
+# Currently we only generate a PGN picture (lines and arcs) using cairo.
+#
+# c Stefan Salewsk, mail@ssalewski.de
+# License GPL
+# Version 0.10 26-OCT-2013
+#
+# Call: ruby router.rb
+# or ruby router.rb seed
+# for reproduceable results
+#
+require 'set'
+require_relative '../RBOOST/Fibonacci_Queue_Hash/rboost_fibonacci_queue'
+require_relative '../RCGAL/rcgal_cdt'
+
+require_relative 'canvas'
+
+$glob = 0 
+
+Board_Size = 3200 # cairo PNG picture
+PCB_Size = 8e4
+Points = 64 # terminal count
+
+# defaults for testing -- of course later each pin/trace can have it's own values
+# currently we use pixels as size unit, later maybe nm (int) or m (float)
+Pin_Radius = 400#450
+Trace_Width = 800
+Clearance = 300
+MinCutSize = 1200
+# for testing
+#Pin_Radius = 1200
+#Trace_Width = 400
+#Clearance = 1200
+#MinCutSize = 2000
+
+module RM
+
+	def self.init_seed
+		seed = (ARGV[0] ? ARGV[0].to_i : rand(1000))
+		print 'random seed is ', seed, "\n"
+		srand(seed)
+		seed
+	end
+
+	# 	  a
+	#    ^
+	#   /
+	# o/--------> b
+	#
+	def self.smart_cross_product_2d_with_offset(ax, ay, bx, by, ox, oy)
+	if ax  == bx && ay == by
+	puts '!!!!!!!!!!!!!!!!!!!!!!!!!!!', ax, ay
+	# fail here is a bug
+	end
+	 #ax  == bx && ay == by
+		ax -= ox
+		ay -= oy
+		bx -= ox
+		by -= oy
+		fail if (ax == 0 && ay == 0) || (bx == 0 && by == 0)
+		if (p = ax * by - ay * bx) != 0
+			return p
+		else
+			return [ax, ay] <=> [bx, by]
+		end
+	end
+
+	def self.boolean_smart_cross_product_2d_with_offset(ax, ay, bx, by, ox, oy)
+		return 0 if ax == bx && ay == by # full turn at terminal with incident net
+		ax -= ox
+		ay -= oy
+		bx -= ox
+		by -= oy
+		fail if (ax == 0 && ay == 0) || (bx == 0 && by == 0) # zero length should nor occur
+		if (p = ax * by - ay * bx) != 0
+			p < 0
+		else
+			([ax, ay] <=> [bx, by]) < 0 # straight line -- ensure well defined result
+		end
+	end
+
+
+	def self.boolean_really_smart_cross_product_2d_with_offset(a, b, o)
+#=begin
+#=end
+		ax = a.vertex.x
+		ay = a.vertex.y
+		bx = b.vertex.x
+		by = b.vertex.y
+		ox = o.vertex.x
+		oy = o.vertex.y
+
+		return 0 if ax == bx && ay == by # full turn at terminal with incident net
+		ax -= ox
+		ay -= oy
+		bx -= ox
+		by -= oy
+		fail if (ax == 0 && ay == 0) || (bx == 0 && by == 0) # zero length should nor occur
+		if (p = ax * by - ay * bx) != 0
+			p < 0
+		else
+		puts 'flap'
+		if o.vertex.cid >= 0
+		puts 'flop'
+			if (a.vertex.cid == o.vertex.cid)
+			puts 'flip'
+				h = -(o.vertex.id - a.vertex.id)
+				return (turn = (h == 1) || (h < -1))
+			elsif (b.vertex.cid == o.vertex.cid)
+			puts 'flup'
+				h = -(b.vertex.id - o.vertex.id)
+				return (turn = (h == 1) || (h < -1))
+			end
+		end
+
+
+
+
+
+
+			#([ax, ay] <=> [bx, by]) < 0 # straight line -- ensure well defined result
+			([ax, ay] <=> [bx, by]) > 0 # straight line -- ensure well defined result
+		end
+	end
+
+
+
+
+end
+
+	def unused_inner_angle(o, a, b)
+		ax = a.x - o.x
+		ay = a.y - o.y
+		bx = b.x - o.x
+		by = b.y - o.y
+		d = (Math.atan2(by, bx) - Math.atan2(ay, ax)).abs
+		d =  2 * Math::PI - d if d > Math::PI
+		d
+	end
+
+
+module RBR
+
+# Net connecting two terminals (2Net)
+class NetDesc
+	@@id = 0
+	attr_accessor :name1, :name2 # name of terminals
+	attr_accessor :thickness
+	attr_accessor :separation
+	attr_accessor :id
+	attr_accessor :pri
+	attr_accessor :flag # used for sorting
+	def initialize(name1, name2, thickness = Trace_Width, separation = Clearance)
+	  @id = @@id += 1
+		@pri = 0
+		@name1, @name2 = name1, name2
+		@thickness, @separation = thickness, separation
+	end
+end
+
+class NetDescList < Array
+end
+
+# Incident or attached net of a terminal
+class Step
+	attr_accessor :id # id of this net
+	attr_accessor :net_desc
+	attr_accessor :vertex # the terminal we are attached or incident to
+	attr_accessor :prev, :next # terminal
+	attr_accessor :pstep, :nstep # step
+	attr_accessor :a, :b, :d, :g, :dir
+	attr_accessor :radius
+	attr_accessor :score # for sorting attached nets of a terminal by angle 
+	attr_accessor :index
+	attr_accessor :ref
+	attr_accessor :rgt
+	attr_accessor :convex # unused
+	attr_accessor :outer
+	attr_accessor :ct, :xt
+	attr_accessor :lr_turn
+
+	def initialize(prev, nxt, id)
+		@prev, @next, @id = prev, nxt, id
+		@radius = 0 # default for incident net
+		@convex = false # unused
+		@outer = false
+	end
+
+	# maybe we should cache this -- should not change
+	def unused_old_cross
+		(@prev.x - @vertex.x) * (@next.y - @vertex.y) - (@prev.y - @vertex.y) * (@next.x - @vertex.x)
+	end
+
+	def cross
+		RM.smart_cross_product_2d_with_offset(@prev.x, @prev.y, @next.x, @next.y, @vertex.x, @vertex.y)
+	end
+
+	def inner_angle 
+		d = (Math.atan2(@next.y - @vertex.y , @next.x - @vertex.x) - Math.atan2(@prev.y - @vertex.y, @prev.x - @vertex.x)).abs
+		d > Math::PI ? 2 * Math::PI - d : d
+	end
+end
+
+# Terminal
+class Vertex < CGAL::Vertex
+	@@id = 0
+	@@cid = 0
+	attr_accessor :id, :cid
+	attr_accessor :vis_flag # for debugging
+	attr_accessor :radius # outer copper
+	attr_accessor :separation # outer clearance
+	attr_accessor :neighbors # Vertex/Terminal, the neighbors in the delaunay triangulation
+	attr_accessor :incident_nets # Step, nets incident to this terminal
+	attr_accessor :attached_nets # Step, nets attached to this terminal
+	attr_accessor :name # name of the Terminal, i.e. U7_3 -- pin 3 of IC U7
+	attr_accessor :tradius, :trgt, :tmp # temporary data
+	attr_accessor :outer # temporary data
+	attr_accessor :lr_turn
+
+	def initialize(x = 0, y = 0)
+		super(x, y)
+		@vis_flag = 0
+	  @id = @@id
+		@cid = -1
+		@@id += 1
+		@radius, @separation = Pin_Radius, Clearance
+		@name = ''
+		#@x = x.to_f # this to_f makes a difference in net ordering (104) -- we have to investigate why
+		#@y = y.to_f # but only when we define "def eql?(other)" below -- I have no idea why
+		@neighbors = Array.new
+		@incident_nets = Array.new
+		@attached_nets = Array.new
+	end
+
+
+	def self.begin_new_cluster
+		@@cid += 1
+	end
+
+	def add_to_current_cluster
+		@cid = @@cid
+	end
+
+
+	def xy
+		return x, y
+	end
+
+  def reset_initial_size
+		@radius, @separation = Pin_Radius, Clearance
+	end
+
+	# may be obsolete -- at least it is only an estimation
+	def resize
+		reset_initial_size
+		attached_nets.each{|step|
+			net = step.net_desc
+			trace_sep = [@separation, net.separation].max
+			@radius += trace_sep + net.thickness
+			step.radius = @radius - net.thickness * 0.5
+			@separation = net.separation
+		}
+	end
+
+	# may be obsolete -- at least it is only an estimation
+  def update(s)
+		net = s.net_desc
+		trace_sep = [@separation, net.separation].max
+		@radius += trace_sep + net.thickness
+		s.radius = @radius - net.thickness * 0.5
+		@separation = net.separation
+	end
+
+	# unused when equ? is not used
+#	def hash
+#    [@x, @y].hash
+#  end
+
+	# this will break net ordering -- at least with @x = x.to_f above
+#  def eql?(other)
+#    [@x, @y].eql?([other.x, other.y])
+#  end
+
+	# returns step -- may become obsolete
+  def net(id)
+		incident_nets.each{|s| return s if s.id == id}
+ 		attached_nets.each{|s| return s if s.id == id}
+		return nil
+	end
+
+  # delete step -- currently we need this, but we should try to avoid it, at least the expensive resize operation
+	def delete_net(id)
+		incident_nets.delete_if{|step| step.id == id}
+		attached_nets.delete_if{|step| step.id == id}
+		resize
+	end
+
+
+  # delete step -- currently we need this, but we should try to avoid it, at least the expensive resize operation
+	def new_delete_net(step)
+		incident_nets.delete_if{|s| step == s}
+		attached_nets.delete_if{|s| step == s}
+		resize
+	end
+
+
+
+	# http://www.ambrsoft.com/TrigoCalc/Circles2/Circles2Tangent_.htm
+	# see http://en.wikibooks.org/wiki/Algorithm_Implementation/Geometry/Tangents_between_two_circles
+	def _get_tangents(x1, y1, r1, l1, x2, y2, r2, l2)
+		d_sq = (x1 - x2) * (x1 - x2) + (y1 - y2) * (y1 - y2)
+		if (d_sq <= (r1-r2)*(r1-r2))
+			puts x1, y1, r1, x2, y2, r2
+			fail
+		end
+		d = Math.sqrt(d_sq)
+		vx = (x2 - x1) / d
+		vy = (y2 - y1) / d
+		sign2 = sign1 = 1
+		sign2 = (l2  ? -1 : 1)
+		sign1 = (l1  ? -1 : 1)
+		sign2 *= sign1
+		c = (r1 - sign2 * r2) / d
+		#if (c*c > 1.0) continue;
+		h = Math.sqrt([0.0, 1.0 - c*c].max)
+		nx = vx * c - sign1 * h * vy
+		ny = vy * c + sign1 * h * vx
+		a = Array.new(4)
+		a[0] = x1 + r1 * nx
+		a[1] = y1 + r1 * ny
+		a[2] = x2 + sign2 * r2 * nx
+		a[3] = y2 + sign2 * r2 * ny
+		return a
+	end
+
+	def currently_unused_tangents_full_angle(s)
+		fail unless s.next && s.prev
+		#return nil unless s.next && s.prev
+		a, b, c = s.prev, s.vertex, s.next
+		id = s.id
+		last_step, cur_step, nxt_step = a.net(id), b.net(id), c.net(id)
+		x1, y1, x2, y2	= _get_tangents(a.x, a.y, last_step.radius, last_step.rgt, b.x, b.y, cur_step.radius, cur_step.rgt)
+		x3, y3, x4, y4	= _get_tangents(b.x, b.y, cur_step.radius, cur_step.rgt, c.x, c.y, nxt_step.radius, nxt_step.rgt)
+		d = Math.atan2(y2 - y1, x2 - x1) - Math.atan2(y4 - y3, x4 - x3)
+		if d < -Math::PI
+		 	d += 2 * Math::PI
+		elsif d > Math::PI
+			d -= 2 * Math::PI
+		end
+		return d
+	end
+
+	def _full_angle(s)
+		return nil unless s.next && s.prev
+		v = s.vertex
+		d = Math.atan2(s.next.y - v.y, s.next.x - v.x) - Math.atan2(v.y - s.prev.y, v.x - s.prev.x)
+		if d < -Math::PI
+		 	d += 2 * Math::PI
+		elsif d > Math::PI
+			d -= 2 * Math::PI
+		end
+		return d
+	end
+
+	# this is the initially version with two hashes, which allows better detection of contradictions. Do not remove, we may need as fallback.
+	def unused_sort_attached_nets # by angle of total trace
+		unless attached_nets.length < 2
+			attached_nets.each{|n| fail unless n.vertex == self; n.index = -n.inner_angle} # largest angle inner most
+			attached_nets.sort_by!{|n| n.index}
+			attached_nets.each_with_index{|n, i| n.index = i}
+			shash = Hash.new
+			attached_nets.each{|n| # group attached nets with same angle (overlapping)
+				l = n.prev
+				r = n.next
+				n.net_desc.flag = 1
+				if shash.has_key?([l, r])
+					shash[[l, r]] << n
+				elsif shash.has_key?([r, l])
+					n.net_desc.flag = -1 # inverted direction
+					shash[[r, l]] << n
+				else
+					shash[[l, r]] = [n]
+				end
+			}
+			shash.each_value{|group| # fine sort each group by following the traces
+				if group.length > 1
+					group.each{|el| el.ref = el}
+					indices = Array.new
+					group.each{|el| indices << el.index}
+					indices.sort!
+					rel = Hash.new#(0) # we use two hashes to detect contradictions -- if all is fine we can use only one common
+					rul = Hash.new#(0) # (0) is only needed if we can not really decide order
+					group_sign = (group[0].cross <=> 0)
+					new_cross = 1
+					gr = group.dup
+					while gr.length > 1
+						gr.map!{|el| (el.net_desc.flag == group_sign ? el.pstep : el.nstep)} # walk in one direction
+						gr.each{|el| el.ref = (el.net_desc.flag == group_sign ? el.nstep.ref : el.pstep.ref)}
+						### new_cross = nil
+						gr.each{|el| if el.next && el.prev then new_cross = (0 <=> el.cross * el.ref.cross); break; end}
+						### fail unless new_cross # all remaining nets stop here -- we assign a preliminary score, which
+						### we may overwrite when we walk in the other direction
+						gr.each{|el| el.score = _full_angle(el)}#, group_sign, new_cross)}
+						unresolved_combinations = false
+						gr.combination(2).each{|el|
+							a, b = *el
+							unless rel.has_key?([a.ref, b.ref])
+								if (c = (a.score <=> b.score)) != 0
+								  if  a.score < 7 ||  b.score < 7 # indicate final sort
+										c *= 2
+									end
+									rel[[a.ref, b.ref]] = c
+									rel[[b.ref, a.ref]] = -c
+								else
+								  unresolved_combinations = true
+								end
+							end
+						}
+						break unless unresolved_combinations
+						gr.keep_if{|el| el.next && el.prev}
+					end
+					gr = group.dup
+					while gr.length > 1
+						gr.map!{|el| (el.net_desc.flag == group_sign ? el.nstep : el.pstep)} # walk in one direction -- the other
+						gr.each{|el| el.ref = (el.net_desc.flag == group_sign ? el.pstep.ref : el.nstep.ref)}
+						### new_cross = nil
+						gr.each{|el| if el.next && el.prev then new_cross = (0 <=> el.cross * el.ref.cross); break; end}
+						### fail unless new_cross # all remaining nets stop here -- we assign a preliminary score, which
+						### we may overwrite when we walk in the other direction
+						gr.each{|el| el.score = _full_angle(el)}#, group_sign, new_cross)}
+						unresolved_combinations = false
+						gr.combination(2).each{|el|
+							a, b = *el
+							unless rul.has_key?([a.ref, b.ref])
+								if (c = (a.score <=> b.score)) != 0
+								  if  a.score < 7 ||  b.score < 7 # indicate final sort
+										c *= 2
+									end
+									rul[[a.ref, b.ref]] = c
+									rul[[b.ref, a.ref]] = -c
+								else
+								  unresolved_combinations = true
+								end
+							end
+						}
+						break unless unresolved_combinations
+						gr.keep_if{|el| el.next && el.prev}
+					end
+					unless rel.eql?(rul)
+						puts 'rel and rul differ'
+						rel.each_pair{|k, v|
+							if rul.has_key?(k) and (rul[k] != v)
+								fail if v.abs == 2 && rul[k].abs == 2 # contradicting final relation
+								puts k, v, rul[k] # they may differ when the net terminates early for at least one direction -- score.abs > 2 PI
+							end
+						}
+					end
+					# nets b and c end at the same terminal for left side -- so we have to investigate the other side for the
+					# correct final ordering. 
+					#   \              /
+					# a  --------------
+					# b    --------------------
+					# c    --------------
+					#                    \
+					# for fully parallel nets arbitrary well defined ordering should work -- score is (8 + s.net_desc.id) for that case
+					# -------------------
+					#   ------------
+					# it seems that the block in merge! is executed always, even when v1 == v2 -- bug in Ruby 1.9.3?
+					rel.merge!(rul){|k, v1, v2| v1.abs > v2.abs ? v1 : v2} # select the final value
+					group.sort!{|a, b| rel[[a, b]]} # do we need rel[[a, b] <=> 0 to ensure -1,0,1 in block? 
+					group.each{|el| el.index = indices.shift}
+				end
+			}
+			attached_nets.sort_by!{|el| el.index}
+		end
+	end
+
+	def sort_attached_nets # by angle of total trace
+		unless attached_nets.length < 2
+			attached_nets.each{|n|
+				fail unless n.vertex == self
+				#n.index = _tangents_full_angle(n) # we may need the tangents angle?
+				n.index = _full_angle(n) * (n.rgt ? 1 : -1)
+			}
+			attached_nets.sort_by!{|n| n.index}
+			attached_nets.each_with_index{|n, i| n.index = i}
+			shash = Hash.new
+			attached_nets.each{|n| # group attached nets with same angle (overlapping)
+				l = n.prev
+				r = n.next
+				n.net_desc.flag = 1
+				if shash.has_key?([l, r])
+					shash[[l, r]] << n
+				elsif shash.has_key?([r, l])
+					n.net_desc.flag = -1 # inverted direction
+					shash[[r, l]] << n
+				else
+					shash[[l, r]] = [n]
+				end
+			}
+			shash.each_value{|group| # fine sort each group by following the traces
+				if group.length > 1
+					group.reverse! # for testing -- initialy reversing the group should give same result!
+					group.each{|el| el.ref = el}
+					indices = Array.new
+					group.each{|el| indices << el.index}
+					indices.sort!
+					rel = Hash.new
+					[-1, 1].each{|direction|
+						gr = group.dup
+						final = true # for first direction we may get only a preliminary order?
+						while gr.length > 1
+							gr.map!{|el| (el.net_desc.flag == direction ? el.pstep : el.nstep)} # walk in one direction
+							gr.each{|el| el.ref = (el.net_desc.flag == direction ? el.nstep.ref : el.pstep.ref)}
+							gr.each{|el| el.score = _full_angle(el)}
+							unresolved_combinations = false
+							gr.combination(2).each{|el|
+								a, b = *el
+								relation = rel[[a.ref, b.ref]]
+								if !relation || relation.abs < 2
+									if !a.score
+										c = ((b.rgt == b.ref.rgt) ? 1 : -1)
+									elsif !b.score
+										c = ((a.rgt == a.ref.rgt) ? -1 : 1)
+									else
+										if (a.score * a.net_desc.flag - b.score * b.net_desc.flag).abs < 1e-6
+										#if ((a.score - b.score).abs < 1e-6) || ((a.score - b.score).abs < 1e-6)
+											c = 0
+										else
+											#c = ((a.score * (a.rgt ? 1 : -1) * ((a.rgt == a.ref.rgt) ? 1 : -1)) <=> (b.score * (b.rgt ? 1 : -1) * ((b.rgt == b.ref.rgt) ? 1 : -1)))
+											c = ((a.score * (a.ref.rgt ? 1 : -1)) <=> (b.score * (b.ref.rgt ? 1 : -1))) # same as above
+										end
+									end
+									if c != 0
+										if  final # indicate final relation
+											c *= 2
+										end
+											rel[[a.ref, b.ref]] = c
+											rel[[b.ref, a.ref]] = -c
+									else
+										unresolved_combinations = true
+									end
+								end
+							}
+							break unless unresolved_combinations
+							gr.keep_if{|el| el.next && el.prev}
+						end
+						fail if unresolved_combinations # we should get at least a preliminary relation
+						break if final # indeed always -- we have no preliminary relations
+					}
+					group.sort!{|a, b| rel[[a, b]]} # do we need rel[[a, b] <=> 0 to ensure -1,0,1 in block? 
+					group.each{|el| el.index = indices.shift}
+				end
+			}
+			attached_nets.sort_by!{|el| -el.index}
+		end
+	end
+end
+
+#   \|/       \|/
+#    |        /\
+#    |        | |
+#   _|/      _| |/ 
+#    |\       | |\
+# when we route a net, we split regions along the path in left and right region.
+# so new paths can not cross this path any more.
+# problem: first and last terminal. we divide the @neighbors of that terminals into
+# @neigl and @neigr -- and allow for these only paths with well defined turn -- left or right
+# 
+class Region
+# :outer_allowed, :only_outer, :convex should be obsolete
+	attr_accessor :vertex, :neighbors, :neigl, :neigr, :name, :incident, :outer_allowed, :only_outer, :convex, :outer, :lane1, :lane2, :restricted_pairs
+	attr_accessor :g, :ox, :oy
+	attr_accessor :a # for sorting
+	attr_accessor :lr_turn
+
+
+  def initialize(v = nil)
+		@g = 1
+		@ox = @oy = 0
+		@vertex = v
+		@neighbors = Array.new
+		@neigl = Array.new
+		@neigr = Array.new
+		@restricted_pairs = Set.new []
+		#@restricted_pairs = Array.new
+
+		@name = nil
+		@incident = true
+		@outer_allowed = true
+		@convex = false
+		@outer = false
+	end
+
+	# what when result is exactly zero?  RM.smart_cross_product_2d_with_offset() should work -- we have to test
+	def bor_cross(a, b)
+		RM.smart_cross_product_2d_with_offset(a.vertex.x, a.vertex.y, b.vertex.x, b.vertex.y, self.vertex.x, self.vertex.y)
+		#((a.vertex.x - self.vertex.x) * (b.vertex.y - self.vertex.y) - (a.vertex.y - self.vertex.y) * (b.vertex.x - self.vertex.x))
+	end
+
+	def hash_qbors(block_hash, old)
+		@neighbors.each{|el|
+			next if el == old
+
+			el.only_outer = !!block_hash[self, old, el]
+
+			yield el
+		}
+	end
+
+	def qbors(old)
+		@neighbors.each{|el|
+			next if el == old
+
+			#el.only_outer = old && (@cid == -1 ) && (@restricted_pairs.include?([old, el]) || @restricted_pairs.include?([el, old]) || 
+			el.only_outer = old && (@restricted_pairs.include?([old, el]) || @restricted_pairs.include?([el, old]) || 
+			((old.vertex.x == el.vertex.x) && (old.vertex.y == el.vertex.y)))
+
+#el.only_outer = false
+			yield el
+		}
+	end
+
+
+
+
+	def unused_qbors(old)
+		old_l = neigl.include?(old)
+		old_r = neigr.include?(old)
+		@neighbors.each{|el|
+			next if el == old
+			el.only_outer = !((!old || (!old_l && !old_r)) ||
+        (old_l && (bor_cross(old, el) < 0)) ||
+        (old_r && (bor_cross(old, el) > 0)))
+			yield el
+		}
+		@neigl.each{|el|
+			next if el == old
+
+			el.only_outer = old && (bor_cross(old, el) <= 0)
+			yield el
+		}
+		@neigr.each{|el|
+			next if el == old
+
+			el.only_outer = old && (bor_cross(old, el) >= 0)
+			yield el
+		}
+	end
+
+	def old_qbors(old)
+		old_l = neigl.include?(old)
+		old_r = neigr.include?(old)
+		@neighbors.each{|el|
+			i = ((!old || (!old_l && !old_r)) or
+        (old_l && (bor_cross(old, el) < 0)) or #ok
+        (old_r && (bor_cross(old, el) > 0)))
+			el.only_outer = !i
+			yield el
+		}
+		@neigl.each{|el|
+			el.only_outer = !(!old ||(bor_cross(old, el) > 0))
+			yield el
+		}
+		@neigr.each{|el|
+			el.only_outer = !(!old ||(bor_cross(old, el) < 0)) #ok
+			yield el
+		}
+	end
+
+
+
+	def fix_lr(r1, r2)
+		@neighbors.delete(r1)
+		@neighbors.delete(r2)
+		@neigl << r1
+		@neigr << r2
+	end
+
+
+
+
+	def replace_neighbors(r1 , r2)
+		if @neighbors.include?(r1)
+			#@neighbors.delete(r1)
+			@neighbors << r2
+		elsif @neigl.include?(r1)
+			#@neigl.delete(r1)
+			@neigl << r2
+		elsif @neigr.include?(r1)
+			#@neigr.delete(r1)
+			@neigr << r2
+		else
+			fail
+		end
+	end
+
+	def duplicate_neighbors(r1 , r)
+		if r1.neighbors.include?(r) 
+			 self.neighbors << r
+		elsif r1.neigl.include?(r) 
+			 self.neigl << r
+		elsif r1.neigr.include?(r) 
+			 self.neigr << r
+		else
+			fail
+		end
+	end
+
+	def distance_to(other)
+		Math.sqrt((self.vertex.x - other.vertex.x) ** 2 + (self.vertex.y - other.vertex.y) ** 2)
+	end
+
+	def squared_distance_to(other)
+		(self.vertex.x - other.vertex.x) ** 2 + (self.vertex.y - other.vertex.y) ** 2
+	end
+
+end
+
+class Cut
+  attr_accessor :cap, :flow
+  def initialize(dx, dy)
+		@cap = Math.sqrt(dx ** 2 + dy ** 2)
+		@flow = 0
+	end
+end
+
+# key is [ax, ay, bx, by] -- coordinates of two points
+# should be insensitive when points are exchanged.
+=begin
+class Cut_Hash < Hash
+  def [](k0, k1, k2, k3)
+		if k0 < k2
+			super([k0, k1, k2, k3])
+		elsif k0 == k2
+			k1 > k3 ? super([k2, k3, k0, k1]): super([k0, k1, k2, k3])
+	  else
+			super([k2, k3, k0, k1])
+    end
+  end
+
+  def []=(k0, k1, k2, k3, v)
+		if k0 < k2
+			super([k0, k1, k2, k3], v)
+		elsif k0 == k2
+			k1 > k3 ? super([k2, k3, k0, k1], v): super([k0, k1, k2, k3], v)
+	  else
+			super([k2, k3, k0, k1], v)
+    end
+  end
+end
+=end
+
+class Cut_Hash < Hash
+  def [](k0, k1, k2, k3)
+		super([[k0, k1], [k2, k3]].sort)
+	end
+  def []=(k0, k1, k2, k3, v)
+		super([[k0, k1], [k2, k3]].sort, v)
+	end
+end
+
+class New_Cut_Hash < Hash
+	def [](v1, v2)
+		if v1.object_id < v2.object_id
+		  super([v1, v2])
+		else
+		  super([v2, v1])
+		end
+	end
+	def []=(v1, v2, c)
+		if v1.object_id < v2.object_id
+		  super([v1, v2], c)
+		else
+		  super([v2, v1], c)
+		end
+	end
+end
+
+class Block_Hash < Hash
+	def [](c, a, b)
+		if a.object_id < b.object_id
+		  super([c, a, b])
+		else
+		  super([c, b, a])
+		end
+	end
+	def []=(c, a, b, v)
+		if a.object_id < b.object_id
+		  super([c, a, b], v)
+		else
+		  super([c, b, a], v)
+		end
+	end
+end
+
+
+# we put only one pin in each cell
+#CS = 30 # Cell_Size
+CS = PCB_Size / 35 # Cell_Size
+
+#
+#Board_Size = 800
+class Router
+	attr_accessor :filename, :netlist
+	attr_accessor :edges_in_cluster
+  def initialize(b1x, b1y, b2x, b2y)
+		@edges_in_cluster = Hash.new;
+		@name_id = 0
+	  @Path_ID = 0
+		@image = Cairo::ImageSurface.new(Board_Size, Board_Size)
+		@pic = Canvas::Pic.new(@image)
+		max_extent = Board_Size.fdiv([b2x - b1x, b2y - b1y].max)
+
+		@pic.scale(max_extent, max_extent)
+		@pic.translate(-b1x, -b1y)
+
+
+		
+		#@image = Cairo::ImageSurface.new(Board_Size, Board_Size)
+		#@pic = Canvas::Pic.new(@image)
+		@pic.set_source_rgba(0.8, 0.8, 0.8, 1)
+		@pic.paint
+		@cdt = CGAL::CDT.new
+		@cdt_hash = Hash.new
+		@cell = Hash.new
+	end
+
+	def next_name
+		@name_id += 1
+		return @name_id.to_s
+	end
+
+	def insert_pcb_vertex(name, x, y)
+	x = x.to_f
+	y = y.to_f
+
+		return if @cdt_hash.include?([x, y])
+
+	puts x, y
+		#v = Vertex.new(x.to_i, y.to_i)
+		v = Vertex.new(x, y)
+		v.name = name
+		@cdt_hash[[x, y]] = v
+
+		@cdt.insert(v)
+	end
+
+	def insert_cluster(c)
+		Vertex.begin_new_cluster
+
+	puts "cph", c.convex_pin_hull.size
+		last_vertex = first_vertex = nil
+		c.convex_pin_hull.each{|v|
+			x = (c.mx + v.rx).to_f
+			y = (c.my + v.ry).to_f
+			if !@cdt_hash.include?([x, y])
+				v = Vertex.new(x, y)
+				v.name = c.name
+				v.add_to_current_cluster if c.convex_pin_hull.size > 1
+
+				first_vertex = v unless first_vertex
+				@cdt_hash[[x, y]] = v
+				@cdt.insert(v)
+				@cdt.insert_constraint(v, last_vertex) if last_vertex
+				last_vertex = v
+				puts "-->8"
+			end
+		}
+		@cdt.insert_constraint(last_vertex, first_vertex) unless (last_vertex == first_vertex) || !first_vertex
+	end
+
+	def test_cluster
+		@cdt.edges_in_constrained_polygons{|v1, v2|
+		#unless @edges_in_cluster.include?([v1, v2]) || @edges_in_cluster.include?([v2, v1])
+			@edges_in_cluster[[v1, v2]] = true
+		#end
+		}
+		puts 'edges_in_cluster', @edges_in_cluster.length
+	end
+
+  def generate_test_vertices
+
+		# put a virtual pin on each corner of our board -- we should need this
+		[0, PCB_Size].repeated_permutation(2).each{|el|
+			v = Vertex.new(*el)
+			@cdt.insert(v)
+			@cell[[el[0] / CS, el[1] / CS]] = 1
+		}
+
+# we can use constraints...
+=begin
+		con = Array.new
+		[300, 500].repeated_permutation(2).each{|el|
+			v = Vertex.new(*el)
+			con << v
+			@cdt.insert(v)
+			el.map!{|x| x / CS}
+			@cell[el] = 1
+		}
+		@cdt.insert_constraint(con[0], con[1])
+		@cdt.insert_constraint(con[0], con[2])
+		@cdt.insert_constraint(con[3], con[1])
+		@cdt.insert_constraint(con[3], con[2])
+=end
+
+		id = 8
+		while id < Points
+			r1, r2 = rand(PCB_Size - PCB_Size / 50) + PCB_Size / 100, rand(PCB_Size - PCB_Size / 50) + PCB_Size / 100
+			if @cell[[r1 / CS, r2 / CS]] == nil
+				@cell[[r1 / CS, r2 / CS]] = 1
+				#if true#unless (300..500).include?(r1) or (300..500).include?(r2)
+				v = Vertex.new(r1, r2)
+				@cdt.insert(v)
+				id += 1
+			end
+		end
+
+	end
+
+
+  def old_generate_test_vertices
+
+		# put a virtual pin on each corner of our board -- we should need this
+		[0, Board_Size].repeated_permutation(2).each{|el|
+			v = Vertex.new(*el)
+			@cdt.insert(v)
+			@cell[[el[0] / CS, el[1] / CS]] = 1
+		}
+
+# we can use constraints...
+=begin
+		con = Array.new
+		[300, 500].repeated_permutation(2).each{|el|
+			v = Vertex.new(*el)
+			con << v
+			@cdt.insert(v)
+			el.map!{|x| x / CS}
+			@cell[el] = 1
+		}
+		@cdt.insert_constraint(con[0], con[1])
+		@cdt.insert_constraint(con[0], con[2])
+		@cdt.insert_constraint(con[3], con[1])
+		@cdt.insert_constraint(con[3], con[2])
+=end
+
+		id = 8
+		while id < Points
+			r1, r2 = rand(Board_Size - 20) + 10, rand(Board_Size - 20) + 10
+			if @cell[[r1 / CS, r2 / CS]] == nil
+				@cell[[r1 / CS, r2 / CS]] = 1
+				#if true#unless (300..500).include?(r1) or (300..500).include?(r2)
+				v = Vertex.new(r1, r2)
+				@cdt.insert(v)
+				id += 1
+			end
+		end
+
+	end
+
+
+	def generate_netlist(l)
+		@netlist = NetDescList.new
+		l.each{|el|
+			x1, y1, x2, y2 = el.map{|x| x.to_f}
+			v1 = @cdt_hash[[x1, y1]]
+			v2 = @cdt_hash[[x2, y2]]
+			fail unless v1 && v2
+			v1.name ||= next_name
+			v2.name ||= next_name
+			#v1.name += 's'
+			#v2.name += 'e'
+			net_desc = NetDesc.new(v1.name, v2.name)
+			net_desc.pri = (x2 - x1) ** 2 + (y2 - y1) ** 2
+			@netlist << net_desc
+		}
+	end
+
+	def sort_netlist
+		@netlist.sort_by!{|el| el.pri} 
+	end
+
+
+
+  def finish_init(rnd_test = false)
+
+
+		@vertices = Array.new # maybe later we do not need this array, we have @cdt.each{}
+		@regions = Array.new
+		@cdt.each{|v|
+		puts 'puhhhhhhhhhhhhhhhhhhhhhhhhhhhh'
+		print v.x, v.y, v.id, "\n"
+			@vertices << v
+			@regions << Region.new(v)
+		}
+		puts @vertices.length
+		#@vertices.pop
+		if rnd_test
+#fail
+		set = @vertices.select{|el| el.id > 3}.each_slice(2).to_a #.shuffle
+		set.sort_by!{|el| (el[0].x - el[1].x) ** 2 + (el[0].y - el[1].y) ** 2}
+		@netlist = NetDescList.new
+		(0..9).each{|i|
+			v1, v2 = *set[i * 3]
+			if v1 && v2
+			v1.name = i.to_s + 's'
+			v2.name = i.to_s + 'e'
+			net_desc = NetDesc.new(v1.name, v2.name)
+			@netlist << net_desc
+			end
+		}
+end
+		@block_hash = Block_Hash.new
+		@cuts = Cut_Hash.new
+		@newcuts = New_Cut_Hash.new
+		@cdt.each{|v|
+			@cdt.neighbor_vertices(v).each{|n|
+				v.neighbors << n
+				if 	@regions[v.id]
+				@regions[v.id].neighbors << @regions[n.id]
+				end
+				ax = v.x
+				ay = v.y
+				bx = n.x
+				by = n.y
+				@cuts[ax, ay, bx, by] = @newcuts[v, n] = Cut.new(ax - bx, ay - by)
+			}
+		}
+	end
+
+
+
+
+
+
+
+
+
+#=begin
+	def flag_vertices
+		@pic.set_source_rgba(1, 0, 0, 1)
+		@pic.set_line_width(1)
+		@vertices.each{|v|
+			if v.vis_flag != 0
+				if v.vis_flag == 1
+					@pic.set_source_rgba(1, 0, 0, 1)
+				else
+					@pic.set_source_rgba(0, 1, 0, 1)
+				end
+				@pic.new_sub_path
+				@pic.set_line_width(1)
+				@pic.arc(v.x, v.y, Pin_Radius, 0, 2*Math::PI)
+				@pic.fill
+				@pic.stroke
+			end
+		}
+	end
+#=end
+
+	def self.cp(ax, ay, bx, by, ox, oy)
+		(ax - ox) * (by - oy) < (ay - oy) * (bx - ox)
+	end
+
+
+
+#         d
+#        /
+#       / .... a------b
+#      /
+#     /
+#    c
+	def extended_segment_intersection(ax, ay, bx, by, cx, cy, dx, dy)
+	return true if ((cx == ax) && (cy == ay)) || ((dx == ax) && (dy == ay)) || ((cx == bx) && (cy == by)) || ((dx == bx) && (dy == by))
+		(self.class.cp(bx, by, cx, cy, ax, ay) != self.class.cp(bx, by, dx, dy, ax, ay)) || (self.class.cp(dx, dy, ax, ay, cx, cy) != self.class.cp(dx, dy, bx, by, cx, cy))
+	end
+
+#         d
+#        /
+#  a-------------b
+#      /
+#     /
+#    c
+	def old_segment_segment_intersection(ax, ay, bx, by, cx, cy, dx, dy)
+	return true if ((cx == ax) && (cy == ay)) || ((dx == ax) && (dy == ay)) || ((cx == bx) && (cy == by)) || ((dx == bx) && (dy == by))
+		#(self.cp(bx, by, cx, cy, ax, ay) != self.cp(bx, by, dx, dy, ax, ay)) && (self.cp(dx, dy, ax, ay, cx, cy) != self.cp(dx, dy, bx, by, cx, cy))
+		(self.class.cp(bx, by, cx, cy, ax, ay) != self.class.cp(bx, by, dx, dy, ax, ay)) && (self.class.cp(dx, dy, ax, ay, cx, cy) != self.class.cp(dx, dy, bx, by, cx, cy))
+	end
+
+=begin
+http://stackoverflow.com/questions/563198/how-do-you-detect-where-two-line-segments-intersect
+int get_line_intersection(float p0_x, float p0_y, float p1_x, float p1_y, 
+    float p2_x, float p2_y, float p3_x, float p3_y, float *i_x, float *i_y)
+{
+    float s02_x, s02_y, s10_x, s10_y, s32_x, s32_y, s_numer, t_numer, denom, t;
+    s10_x = p1_x - p0_x;
+    s10_y = p1_y - p0_y;
+    s32_x = p3_x - p2_x;
+    s32_y = p3_y - p2_y;
+
+    denom = s10_x * s32_y - s32_x * s10_y;
+    if (denom == 0)
+        return 0; // Collinear
+    bool denomPositive = denom > 0;
+
+    s02_x = p0_x - p2_x;
+    s02_y = p0_y - p2_y;
+    s_numer = s10_x * s02_y - s10_y * s02_x;
+    if ((s_numer < 0) == denomPositive)
+        return 0; // No collision
+
+    t_numer = s32_x * s02_y - s32_y * s02_x;
+    if ((t_numer < 0) == denomPositive)
+        return 0; // No collision
+
+    if (((s_numer > denom) == denomPositive) || ((t_numer > denom) == denomPositive))
+        return 0; // No collision
+    // Collision detected
+    t = t_numer / denom;
+    if (i_x != NULL)
+        *i_x = p0_x + (t * s10_x);
+    if (i_y != NULL)
+        *i_y = p0_y + (t * s10_y);
+
+    return 1;
+}
+=end
+
+	def segment_segment_intersection(p0_x, p0_y, p1_x, p1_y, p2_x, p2_y, p3_x, p3_y)
+		s10_x = p1_x - p0_x
+		s10_y = p1_y - p0_y
+		s32_x = p3_x - p2_x
+		s32_y = p3_y - p2_y
+		denom = s10_x * s32_y - s32_x * s10_y
+		return nil if denom == 0 # collinear
+		denomPositive = denom > 0
+		s02_x = p0_x - p2_x
+		s02_y = p0_y - p2_y
+		s_numer = s10_x * s02_y - s10_y * s02_x
+		return nil if (s_numer < 0) == denomPositive #  No collision
+		t_numer = s32_x * s02_y - s32_y * s02_x
+		return nil if (t_numer < 0) == denomPositive #  No collision
+		return nil if ((s_numer > denom) == denomPositive) || ((t_numer > denom) == denomPositive) #  No collision
+		# Collision detected
+		t = t_numer / denom
+		return p0_x + t * s10_x, p0_y + t * s10_y
+	end
+
+	# boolean result
+	def segment_segment_intersection?(p0_x, p0_y, p1_x, p1_y, p2_x, p2_y, p3_x, p3_y)
+		s10_x = p1_x - p0_x
+		s10_y = p1_y - p0_y
+		s32_x = p3_x - p2_x
+		s32_y = p3_y - p2_y
+		denom = s10_x * s32_y - s32_x * s10_y
+		return false if denom == 0 # collinear
+		denomPositive = denom > 0
+		s02_x = p0_x - p2_x
+		s02_y = p0_y - p2_y
+		s_numer = s10_x * s02_y - s10_y * s02_x
+		return false if (s_numer < 0) == denomPositive #  No collision
+		t_numer = s32_x * s02_y - s32_y * s02_x
+		return false if (t_numer < 0) == denomPositive #  No collision
+		((s_numer > denom) != denomPositive) && ((t_numer > denom) != denomPositive)
+	end
+
+	def draw_vertices
+		@pic.set_source_rgba(0, 0, 0, 0.3)
+		@pic.set_line_width(100)
+		puts 'puff'
+		@vertices.each{|v|
+		print v.x, ' ', v.y , " pu\n"
+			@pic.new_sub_path
+			if v.cid == -1
+			@pic.arc(v.x, v.y, Pin_Radius, 0, 2 * Math::PI)
+
+			else
+
+			@pic.arc(v.x, v.y, Pin_Radius, 0, 2 * Math::PI)
+			end
+			@pic.fill
+			@pic.stroke
+			v.neighbors.each{|n|
+			if @edges_in_cluster.include?([v, n]) || @edges_in_cluster.include?([n, v])
+		@pic.set_source_rgba(1, 0, 0, 0.3)
+
+				@pic.move_to(v.x, v.y)
+				@pic.line_to(n.x, n.y)
+				@pic.stroke
+			else
+		@pic.set_source_rgba(0, 0, 0, 0.3)
+
+				@pic.move_to(v.x, v.y)
+				@pic.line_to(n.x, n.y)
+				@pic.stroke
+
+
+			end
+
+
+
+
+			}
+			#@pic.stroke
+		}
+=begin
+					puts 'paff'
+
+@edges_in_cluster.each_key{|v1, v2|
+		puts 'v1', v1.x, v1.y
+		puts 'v2', v2.x, v2.y
+
+		print v1.x, ' ', v1.y , " pa\n"
+		print v2.x, ' ', v2.y , " pa\n"
+
+		@pic.set_source_rgba(1, 0, 0, 1)
+
+				@pic.move_to(v1.x, v1.y)
+				@pic.line_to(v2.x, v2.y)
+				@pic.stroke
+
+
+
+}
+=end
+
+
+
+
+
+
+
+
+
+		@pic.stroke
+		@pic.set_source_rgba(1, 0, 0, 0.7)
+		@pic.set_line_width(200)
+		@cuts.each_pair{|k, v|
+			if v.cap < MinCutSize
+				@pic.move_to(*k[0])
+				@pic.line_to(*k[1])
+			end
+		}
+		@pic.stroke
+	end
+
+	def gen_line(x0, y0, x1, y1, w)
+		@pic.set_line_width(w)
+		@pic.move_to(x0, y0)
+		@pic.line_to(x1, y1)
+		@pic.stroke
+	end
+
+  def gen_arc(x, y, r, from, to, width)
+		@pic.new_sub_path
+		@pic.set_line_width(width)
+		@pic.arc(x, y, r, from, to)
+		@pic.stroke
+	end
+
+# http://www.faqs.org/faqs/graphics/algorithms-faq/
+# http://www.ecse.rpi.edu/Homepages/wrf/Research/Short_Notes/pnpoly.html
+# int pnpoly(int nvert, float *vertx, float *verty, float testx, float testy)
+# {
+#   int i, j, c = 0;
+#   for (i = 0, j = nvert-1; i < nvert; j = i++) {
+#     if ( ((verty[i]>testy) != (verty[j]>testy)) &&
+# 	 (testx < (vertx[j]-vertx[i]) * (testy-verty[i]) / (verty[j]-verty[i]) + vertx[i]) )
+#        c = !c;
+#   }
+#   return c;
+# }
+#
+# input: array of vertices
+# result: the vertices inside the polygon (or on the border?)
+	def vertices_in_polygon(p_vertices, test_vertices)
+		res = Array.new
+		nm1 = p_vertices.length - 1
+		test_vertices.each_with_index{|tp, k|
+			ty = tp.y
+			i = 0
+			j = nm1
+			c = false
+			while i <= nm1
+        if ((((p_vertices[i].y <= ty) && (ty < p_vertices[j].y)) ||
+             ((p_vertices[j].y <= ty) && (ty < p_vertices[i].y))) &&
+            (tp.x < (p_vertices[j].x - p_vertices[i].x) * (ty - p_vertices[i].y) / (p_vertices[j].y - p_vertices[i].y) + p_vertices[i].x))
+					 c = !c
+				end
+				j = i
+				i += 1
+			end
+			res << tp if c
+		}
+		res
+	end
+
+
+#     (x2,y2)
+#    /
+#   /    (x0,y0)
+#  /
+# (x1,y1)
+# http://mathworld.wolfram.com/Point-LineDistance2-Dimensional.html
+def distance_line_point(x1, y1, x2, y2, x0, y0)
+	x12 = x2 - x1
+	y12 = y2 - y1
+	(x12 * (y1 - y0) - (x1 - x0) * y12).abs / Math.hypot(x12, y12)
+end
+
+def distance_line_point_squared(x1, y1, x2, y2, x0, y0)
+	x12 = x2 - x1
+	y12 = y2 - y1
+	(x12 * (y1 - y0) - (x1 - x0) * y12) ** 2 / (x12 ** 2 + y12 ** 2)
+end
+
+	#      (c)
+	#     /
+	#    /     (p)
+	#   /
+	# (b)
+	# see http://www.geometrictools.com/
+	# see also http://paulbourke.net/geometry/pointlineplane/
+	#
+	def unused_distance_line_segment_point_squared(bx, by, cx, cy, px, py)
+		mx = cx - bx
+		my = cy - by
+		hx = px - bx
+		hy = py - by
+		t0 = (mx * hx + my * hy).fdiv(mx ** 2 + my ** 2)
+		if t0 <= 0
+		elsif t0 < 1
+			hx -= t0 * mx
+			hy -= t0 * my
+		else
+			hx -= mx
+			hy -= my
+		end
+		return hx ** 2 + hy ** 2
+	end
+
+	# Intersection point of two lines in 2 dimensions
+	# http://paulbourke.net/geometry/pointlineplane/
+	def line_line_intersection(x1, y1, x2, y2, x3, y3, x4, y4)
+		x2x1 = x2 - x1
+		y2y1 = y2 - y1
+		return nil if (d = (y4 - y3) * x2x1 - (x4 - x3) * y2y1) == 0 # parallel?
+		ua = ((x4 - x3) * (y1 - y3) - (y4 - y3) * (x1 - x3)) / d
+		ub = (x2x1 * (y1 - y3) - y2y1 * (x1 - x3)) / d
+		[x1 + ua * x2x1, y1 + ua * y2y1, ua, ub]
+	end
+
+	def unused_vertices_touch_line(x1, y1, x2, y2, line_thickness, line_separation, vertices)
+		v_in = Array.new
+		vertices.each{|v|
+			s = [v.separation, line_separation].max
+			if unused_distance_line_segment_point_squared(x1, y1, x2, y2, v.x, v.y) < (v.radius + s + line_thickness * 0.5) ** 2
+				v_in << v
+			end
+		}
+		v_in
+	end
+
+	# P_IN = 1; P_ON = 0; P_OUT = -1 
+	# see http://en.wikipedia.org/wiki/Barycentric_coordinates_%28mathematics%29
+	def unused_point_in_triangle(x1, y1, x2, y2, x3, y3, x, y)
+		d  =  (y2 - y3) * (x1 - x3) + (x3 - x2) * (y1 - y3)
+		l1 = ((y2 - y3) * (x - x3) + (x3 - x2) * (y - y3)) / d
+		l2 = ((y3 - y1) * (x - x3) + (x1 - x3) * (y - y3)) / d
+		l3 = 1 - l1 - l2
+		min, max = [l1, l2, l3].minmax
+		if 0 <= min && max <= 1
+			0 < min && max < 1 ? P_IN : P_ON
+		else
+			P_OUT
+		end
+	end
+
+	def unused_vertices_in_triangle(x1, y1, x2, y2, x3, y3, vertices)
+		d  =  (y2 - y3) * (x1 - x3) + (x3 - x2) * (y1 - y3)
+		v_in = Array.new
+		if d == 0
+			puts 'vertices_in_triangle, degenerated'
+			return v_in
+		end
+		y2my3 = (y2 - y3) / d
+		x3mx2 = (x3 - x2) / d
+		x1mx3 = (x1 - x3) / d
+		y3my1 = (y3 - y1) / d
+		vertices.each{|v|
+			vxmx3 = v.x - x3
+			vymy3 = v.y - y3
+			l1 = y2my3 * vxmx3 + x3mx2 * vymy3
+			l2 = y3my1 * vxmx3 + x1mx3 * vymy3
+			min, max = [l1, l2, 1 - l1 - l2].minmax
+			if 0 <= min && max <= 1
+				v_in << v
+			end
+		}
+		v_in
+	end
+
+	# see http://en.wikibooks.org/wiki/Algorithm_Implementation/Geometry/Convex_hull/Monotone_chain
+	def unused_hcross(o, a, b)
+		(a[0] - o[0]) * (b[1] - o[1]) - (a[1] - o[1]) * (b[0] - o[0])
+	end
+	def unused_convex_hull(points)
+		points.sort!.uniq!
+		return points if points.length < 3
+		lower = Array.new
+		points.each{|p|
+			while lower.length > 1 and unused_hcross(lower[-2], lower[-1], p) <= 0 do lower.pop end
+			lower.push(p)
+		}
+		upper = Array.new
+		points.reverse_each{|p|
+			while upper.length > 1 and unused_hcross(upper[-2], upper[-1], p) <= 0 do upper.pop end
+			upper.push(p)
+		}
+		return lower[0...-1] + upper[0...-1]
+	end
+
+	def smarter_cross_tangents(last_step, cur_step, nxt_step)
+		l, c, n = last_step.vertex, cur_step.vertex, nxt_step.vertex
+		x1, y1, x2, y2	= get_tangents(l.x, l.y, last_step.radius, last_step.rgt, c.x, c.y, cur_step.radius, cur_step.rgt)
+		x3, y3, x4, y4	= get_tangents(c.x, c.y, cur_step.radius, cur_step.rgt, n.x, n.y, nxt_step.radius, nxt_step.rgt)
+		(y3 - y1) * (x4 - x3) + (x1 - x3) * (y4 - y3) < 0 # that should be wrong!
+		#(y2 - y1) * (x4 - x3) - (x2 - x1) * (y4 - y3) < 0
+		#(x2 - x1) * (y4 - y3) - (y2 - y1) * (x4 - x3) > 0
+		#(x2 - x1) * (y4 - y3) > (y2 - y1) * (x4 - x3)
+	end
+
+	def extended_cross_tangents(last_step, cur_step, nxt_step, cr = nil)
+		cr = cur_step.radius unless cr
+		l, c, n = last_step.vertex, cur_step.vertex, nxt_step.vertex
+		x1, y1, x2, y2	= get_tangents(l.x, l.y, last_step.radius, last_step.rgt, c.x, c.y, cr, cur_step.rgt)
+		x3, y3, x4, y4	= get_tangents(c.x, c.y, cr, cur_step.rgt, n.x, n.y, nxt_step.radius, nxt_step.rgt)
+		#(y3 - y1) * (x4 - x3) + (x1 - x3) * (y4 - y3) < 0 # that should be wrong!
+		#(y2 - y1) * (x4 - x3) - (x2 - x1) * (y4 - y3) < 0
+		#(x2 - x1) * (y4 - y3) - (y2 - y1) * (x4 - x3) > 0
+		(x2 - x1) * (y4 - y3) > (y2 - y1) * (x4 - x3)
+
+	end
+
+	def extended_crossing_tangents(prev_step, cur_step, nxt_step)
+		p, c, n = prev_step.vertex, cur_step.vertex, nxt_step.vertex
+		x1, y1, x2, y2	= get_tangents(p.x, p.y, prev_step.radius, prev_step.rgt, c.x, c.y, cur_step.radius, cur_step.rgt)
+		x3, y3, x4, y4	= get_tangents(c.x, c.y, cur_step.radius, cur_step.rgt, n.x, n.y, nxt_step.radius, nxt_step.rgt)
+		[x1, y1, *line_line_intersection(x1, y1, x2, y2, x3, y3, x4, y4), x4, y4]
+	end
+
+
+
+	def smart_cross_tangents(a, b, c, id)
+		last_step, cur_step, nxt_step = a.net(id), b.net(id), c.net(id)
+		#fail if last_step != a.pstep
+		x1, y1, x2, y2	= get_tangents(a.x, a.y, last_step.radius, last_step.rgt, b.x, b.y, cur_step.radius, cur_step.rgt)
+		x3, y3, x4, y4	= get_tangents(b.x, b.y, cur_step.radius, cur_step.rgt, c.x, c.y, nxt_step.radius, nxt_step.rgt)
+		a1 = (y3 - y1) * (x4 - x3) + (x1 - x3) * (y4 - y3) # a = a1 / a2
+		return (a1 < 0) #^ h[1].trgt # funny, we do not need a2 -- no problem with division by zero
+	end
+
+=begin
+Problem: Fat inner terminal.
+Vector U tangent from small terminal to inner large one.
+Vector V tangent from inner large one to small terminal.
+Cross product will change sign when inner large terminal
+becomes larger than about the distance of the both small
+outer terminals. One solution: calculate the intersection
+point of the two vectors: Equation
+U0 + aU = V0 + bV
+For the usual case a should be positive. But a becomes negative
+when the cross product changes sign due to the blown up inner
+terminal size. (This is for the case U x V < 0 only as in the
+picture below -- for U x V > 0 there should be no problem at all.
+(An alternative approach may be to regard the tangent vectors as
+line segments and check if they cross.)
+      
+    -//---\\
+    //     \\
+ U / |     | \V
+  /   \ __ /  \
+ /             \
+/O            O_\|
+
+U0 + aU = V0 + bV
+-
+U0x + aUx = V0x + bVx
+U0y + aUy = V0y + bVy
+-
+Solve for a -- its sign is important
+(U0x + aUx - V0x) / Vx = b
+U0y + aUy = V0y + Vy * (U0x + aUx - V0x) / Vx
+a * (Uy - Ux * Vy / Vx) = V0y + Vy * (U0x - V0x) / Vx - U0y
+a * (Uy * Vx - Ux * Vy) = V0y * Vx + Vy * (U0x - V0x) - U0y * Vx
+a = ((V0y - U0y) * Vx + Vy * (U0x - V0x)) / (Uy * Vx - Ux * Vy)
+=end
+	### do not delete this, it shows the history
+	def unused_unoptimized_convex_vertices(vertices, prev, nxt)
+		fail if prev == nxt
+		fail if vertices.uniq!
+		fail unless vertices.include?(prev) && vertices.include?(nxt)
+		x = prev.x
+		y = prev.y
+		xx = nxt.x - x
+		yy = nxt.y - y
+		vertices.sort_by!{|el| (el.x - x) * xx + (el.y - y) * yy}#.uniq!
+		while vertices[0] != prev do vertices.shift end
+		while vertices[-1] != nxt do vertices.pop end
+		return vertices if vertices.length < 3
+		h = Array.new
+		turn = ->(v; x1, y1, x2, y2, x3, y3, x4, y4, h1, h2, a1) {
+			h2, h1 = h[-2, 2]
+			x1, y1, x2, y2 = get_tangents(h2.x, h2.y, h2.tradius, h2.trgt, h1.x, h1.y, h1.tradius, h1.trgt)
+			x3, y3, x4, y4 = get_tangents(h1.x, h1.y, h1.tradius, h1.trgt, v.x, v.y, v.tradius, v.trgt)
+			a1 = (y3 - y1) * (x4 - x3) + (x1 - x3) * (y4 - y3) # a = a1 / a2
+			a2 = (y2 - y1) * (x4 - x3) - (x2 - x1) * (y4 - y3) # this is the negative cross product of U and V
+			if  !vertices[1].trgt # we are looking for the upper hull
+				if (a2 > 0) # cw turn, keep this point if a1/a2 > 0
+					return a1 > 0
+				else
+					return false
+				end
+			else # or lower hull
+				if (a2 < 0) # ccw turn, keep this point if a1/a2 > 0
+					return a1 < 0
+				else
+					return false
+				end
+			end
+		}
+		vertices.each{|v|
+			while h.length > 1 and (!turn[v]) do h.pop end
+			h.push(v)
+		}
+		#h.delete(prev) # caller may do this
+		#h.delete(nxt)
+		h
+	end
+
+	def new_convex_vertices(vertices, prev, nxt)
+		fail if prev == nxt
+		fail if vertices.uniq!
+		#fail unless vertices.include?(prev) && vertices.include?(nxt)
+		vertices |= [prev, nxt]
+		x1 = prev.x
+		y1 = prev.y
+		x2 = nxt.x - x1
+		y2 = nxt.y - y1
+		vertices.sort_by!{|el| el.tmp = (el.x - x1) * x2 + (el.y - y1) * y2}
+		fail if vertices.first != prev
+		fail if  vertices.last != nxt
+		return vertices if vertices.length < 3
+		gt = vertices[1].trgt
+		hull = Array.new
+		vertices.each{|v|
+			while hull.length > 1 do
+				x1, y1 = hull[-2].xy
+				x2, y2 = hull[-1].xy
+				if ((x2 - x1) * (v.y - y2) < (y2 - y1) * (v.x - x2)) == gt 
+					hull.pop
+				else
+					break
+				end
+			end
+			hull.push(v)
+		}
+		ttt = Array.new
+		hull.each_cons(2){|a, b|
+			ttt << get_tangents(a.x, a.y, a.tradius, a.trgt, b.x, b.y, b.tradius, b.trgt)
+		}
+		vertices -= hull
+		vertices.each{|v|
+			ttt.each{|ax, ay, bx, by|
+				if unused_distance_line_segment_point_squared(ax, ay, bx, by, v.x, v.y) < v.tradius ** 2
+					hull << v
+					break
+				end
+			}
+		}
+		hull.sort_by!{|el| el.tmp}
+		fail if hull[0] != prev
+		fail if hull[-1] != nxt
+		vertices.clear
+		ttt.clear
+		hull.each{|v|
+			while !vertices.empty? do
+				h1 = vertices[-1]
+				tangent = get_tangents(h1.x, h1.y, h1.tradius, h1.trgt, v.x, v.y, v.tradius, v.trgt)
+				if vertices.length == 1
+					ttt << tangent
+					break
+				end
+				if segment_segment_intersection?(*ttt.last, *tangent)
+					vertices.pop
+					ttt.pop
+				else
+					ttt << 	tangent
+					break
+				end
+			end
+			vertices.push(v)
+		}
+		return vertices
+	end
+
+	def incident_net_to_neighbors?(vertex, neighbors)
+		!(vertex.incident_nets.map{|el| el.next || el.prev} & neighbors).empty?
+	end
+
+	def unused_basic_dijkstra(start_node)
+		# Nodes that may have neighbours wich can be relaxed further
+		active = PriorityQueue.new         
+		# Best distances found so far
+		distances = Hash.new { 1.0 / 0.0 } 
+		# Parent pointers describing shortest paths for all nodes
+		parents = Hash.new                 
+		# Initialize with start node
+		active[start_node] = 0
+		until active.empty?
+			u, distance = active.delete_min
+			distances[u] = distance
+			d = distance + 1
+			u.neighbours.each do | v |
+				next unless d < distances[v] # we can't relax this one
+				active[v] = distances[v] = d
+				parents[v] = u
+			end    
+		end
+		parents
+	end
+
+	class Smarter_Queue
+		def initialize
+			@q = BOOST::Fibonacci_Queue.new
+			@h = Hash.new
+		end
+
+		def []=(el, k)
+			if x = @h[el]
+				#@q[x] = k
+				@q.update(x, k)
+			else
+				#@q[el] = k
+				@q.insert(el, k)
+				@h[el] = el
+			end
+		end
+
+		def pop
+		#puts  @q.to_a[0][0]
+		#puts  @q.to_a[0][1]
+
+		#puts  @q.to_a[0][2]
+mi = 1e6
+@q.each{|el| mi = el[1] if mi > el[1]}
+		#fail
+		#mi = @q.to_a.min_by{|el| el[1]}
+			el, k = @q.pop
+			puts '###', mi, k
+			fail unless mi == k
+			@h.delete(el)
+			return el, k
+		end
+	end
+
+	# https://en.wikipedia.org/wiki/Dijkstra%27s_algorithm
+	# u --> v --> w
+	# Dijkstra's shortest path search
+	#
+	#        v-----w
+	#  \    /
+	#   \  /
+	#    u
+	#
+	# Generally we route at the inner lane -- doing so ensures that inner
+	# and outer lanes do not cross in the triangulation of all the vertices.
+	# When the turn at u is opposite to the turn at v then we have to cross
+	# the line segment connecting u and v -- we need space for that.
+	# But when there starts an incident net in the inner lane this path
+	# is blocked, so we can use the outer lane, there can exist no inner
+	# crossing lanes. If we take the outer lane at v and inner lane at u,
+	# we have not to cross the line segment connection u and v and so on...
+	#
+	# So for this variant of Dijkstra's shortest path search we have not only to
+	# record the previuos node, but also the lane (inner/outer) we took, because
+	# the next node may be only reachable when we do not have to cross a line
+	# segment between current and next node.
+	#
+	# So the key for the Fibonacci_Queue and parents and distances is not simple
+	# a node, but a tupel of node and lane.
+	#
+	# Paths (from v to w) can be blocked, i.e. if there exist neighbor terminals
+	# close to v, so that there is no room for the trace.
+	#
+	#
+	# TODO: Optimizing
+	def dijkstra(start_node, end_node_name)
+		fail unless start_node
+		puts start_node.vertex.name, end_node_name
+
+		fail if start_node.vertex.name == end_node_name
+		q = BOOST::Fibonacci_Queue.new(-1, Float::INFINITY)
+		distances = Hash.new(Float::INFINITY)
+		parents = Hash.new
+		outer_lane = Hash.new
+		lane_hash = Hash.new
+		visited = Hash.new
+			visited[[start_node, true]] = true
+			visited[[start_node, false]] = true
+
+		x, y = start_node.vertex.xy
+		start_cid = start_node.vertex.cid
+		start_cid = -2 if start_cid == -1
+
+		start_node.qbors(nil) do |w| # initial steps are never blocked, so fill them in
+					next if @edges_in_cluster.include?([start_node.vertex, w.vertex]) || @edges_in_cluster.include?([w.vertex, start_node.vertex])
+
+			q[[w, false]] = q[[w, true]] = Math.hypot(w.vertex.x - x, w.vertex.y - y)
+			#visited[[w, true]] = visited[[w, false]] = true
+			parents[[w, false]] =	parents[[w, true]] = [start_node, false]
+			# w.lane1 = w.lane2 = outer_lane[[w, true]] = outer_lane[[w, false]] = true # can remain undefined
+		end
+		while true do
+			min, old_distance = q.pop
+			$glob += 1
+#next if visited.include?(min)
+
+			visited[min] = true
+
+			v, prev_lane = *min
+			visited[[v, prev_lane]] = true
+			#visited[[v, true]] = true
+			#visited[[v, false]] = true
+
+			break if !min or ((v.vertex.name == end_node_name) and v.incident)
+			distances[min] = old_distance # obsolete
+			x, y = v.vertex.xy
+			oold = parents[min]
+			u = oold[0]
+			v.qbors(u) do |w|
+		#	next if visited.include?([w, true]) || visited.include?([w, false]) 
+						next if @edges_in_cluster.include?([v.vertex, w.vertex]) || @edges_in_cluster.include?([w.vertex, v.vertex])
+
+next if w.only_outer && v.vertex.cid > -1
+
+				fail if u == w
+				#if false#w.vertex.cid == start_cid
+				#if false#(start_cid != -1) && (w.vertex.cid == start_cid)
+				if (v.vertex.cid != start_cid) && (w.vertex.cid == start_cid)
+new_distance = 1e8
+				#elsif (v.vertex.cid == start_cid) && (w.vertex.cid != start_cid)
+				elsif (v.vertex.cid == start_cid) && (w.vertex.cid == start_cid)
+#new_distance = [Math.hypot(w.vertex.x - x, w.vertex.y - y), old_distance + 1].max
+				new_distance = old_distance + Math.hypot(w.vertex.x - x, w.vertex.y - y) * 0.1
+
+				puts 'rrr', new_distance, u.vertex.cid, v.vertex.cid, w.vertex.cid
+#new_distance = old_distance + 1
+				else
+				new_distance = old_distance + Math.hypot(w.vertex.x - x, w.vertex.y - y)
+				end
+				outer_distance = new_distance
+				#lane = RM.boolean_smart_cross_product_2d_with_offset(u.vertex.x, u.vertex.y, w.vertex.x, w.vertex.y, v.vertex.x, v.vertex.y)
+				lane = RM.boolean_really_smart_cross_product_2d_with_offset(u, w, v)
+next if visited.include?([w, lane])
+
+				#fail if lane != lane2
+				if !(can_out = w.only_outer) && !distances.include?([w, lane])
+					not_blocked = catch(:blocked){
+						lcuts = new_bor_list(u, w, v)
+						# check space at inner side
+						lcap = lcuts.inject(1e4){|min, el| [@newcuts[v.vertex, el].cap, min].min}
+
+
+						if v.vertex.cid >= 0
+						#fail
+						#puts 'zzz'
+							if (u.vertex.cid == v.vertex.cid)
+								h = (v.vertex.id - u.vertex.id)
+								if ((h == 1) || (h < -1)) != lane
+									can_out = true
+									throw :blocked
+								end
+							elsif (w.vertex.cid == v.vertex.cid)
+								h = (w.vertex.id - v.vertex.id)
+								if ((h == 1) || (h < -1)) != lane
+									can_out = true
+									throw :blocked
+								end
+							end
+						end
+
+
+
+						
+						throw :blocked if lcap < MinCutSize
+						throw :blocked if (lane != prev_lane) && @newcuts[v.vertex, u.vertex].cap < MinCutSize
+						# now test special case when we touch a terminal with incident nets #straight
+						v.vertex.incident_nets.map{|el| el.nstep || el.pstep}.each{|el|
+							can_out = true if lcuts.include?(el.vertex) && v.vertex.cid == -1
+							throw :blocked if lcuts.include?(el.vertex)
+							throw :blocked if !(el.nstep && el.pstep) && (lane != prev_lane) && (el.vertex == u.vertex)
+						}
+						if hhh = @newcuts[w.vertex, u.vertex]
+							nd = distances[oold] + hhh.cap * 1.1
+							if nd < new_distance
+								new_distance = [nd, old_distance + 1].max
+							end
+						elsif lcap * 2 > v.distance_to(w) + v.distance_to(u)
+							nd =  distances[oold] + Math.hypot(u.vertex.x - w.vertex.x, u.vertex.y - w.vertex.y) * 1.1
+							if nd < new_distance
+								new_distance = [nd, old_distance + 1].max
+							end
+						end
+						if lane != prev_lane
+							new_distance += 25
+						end
+						throw :blocked unless new_distance < q[[w, lane]]
+						(lcap > MinCutSize) # not blocked
+					}
+					if not_blocked
+						#lane ? w.lane1 = false : w.lane2 = false # unused, we store that info in outer_lane hash
+						outer_lane[[w, lane]] = false
+						lane_hash[[w, lane]] = lane
+						q[[w, lane]] = new_distance
+						parents[[w, lane]] = min
+					end
+				end
+			# try outer path
+				if can_out && !distances.include?([w, !lane])
+					new_distance = outer_distance
+					not_blocked = catch(:blocked) {
+						lane = !lane#!(cross_abc(u, v, w) > 0)
+						lcuts = v.vertex.neighbors - (lcuts || new_bor_list(u, w, v)) - [u.vertex, w.vertex]
+						# check space at inner side
+						lcap = lcuts.inject(1e4){|min, el| [@newcuts[v.vertex, el].cap, min].min}
+						throw :blocked if (lcap < MinCutSize)
+						throw :blocked if (lane != prev_lane) && @newcuts[v.vertex, u.vertex].cap < MinCutSize
+						# now test special case when we touch a terminal with incident nets #straight
+						v.vertex.incident_nets.map{|el| el.nstep || el.pstep}.each{|el|
+							throw :blocked if lcuts.include?(el.vertex)
+							#throw :blocked if !(el.nstep && el.pstep) && (lane != prev_lane)
+							throw :blocked if !(el.nstep && el.pstep) && (lane != prev_lane) && (el.vertex == u.vertex)
+						}
+						if lane != prev_lane
+							new_distance += 25
+						end
+						throw :blocked unless new_distance < q[[w, lane]]
+						lcap = 0 if u == w
+						(lcap > MinCutSize) # not blocked
+					}
+					if not_blocked
+						#lane ? w.lane1 = true : w.lane2 = true # unused
+						outer_lane[[w, lane]] = true
+						lane_hash[[w, lane]] = !lane
+						q[[w, lane]] = new_distance
+						parents[[w, lane]] = min
+					end
+				end
+			end
+		end    
+		puts parents.length
+		#exit
+		path = Array.new
+		p = min
+		while p
+		puts p
+			if n = parents[p]
+				# n[0].outer = (p[1] ? p[0].lane1 : p[0].lane2) # we use the hash
+				n[0].outer = outer_lane[p]
+				n[0].lr_turn = lane_hash[p]
+
+			end
+			path << p[0]
+			p = n
+		end
+		cid = path.last.vertex.cid
+		puts 'cid', cid
+		#if false#cid != -1
+		if cid != -1
+		while path[-2].vertex.cid == cid
+		path.pop
+		end
+		end
+		#path.keep_if?{|el| el.vertex.cid == -}
+		return path
+	end
+
+	def y_cross(o, a, b)
+		(a.vertex.x - o.vertex.x) * (b.y - o.vertex.y) - (a.vertex.y - o.vertex.y) * (b.x - o.vertex.x)
+	end
+
+	def cross_abc(a, b, c)
+		(b.vertex.x - a.vertex.x) * (c.vertex.y - b.vertex.y) - (b.vertex.y - a.vertex.y) * (c.vertex.x - b.vertex.x)
+	end
+
+	def new_cross_abc(a, b, c)
+
+		(b.vertex.x - a.vertex.x) * (c.vertex.y - b.vertex.y) - (b.vertex.y - a.vertex.y) * (c.vertex.x - b.vertex.x)
+	end
+
+	def no_cross(o, a, b)
+		(a.vertex.x - o.vertex.x) * (b.vertex.y - o.vertex.y) - (a.vertex.y - o.vertex.y) * (b.vertex.x - o.vertex.x)
+	end
+
+	#          /neighbor
+	#     a   /
+	# <-------\
+	#       /  \b
+	#      /    \
+	#return these
+	def no_split_neighbor_list(a, b, n)
+
+		l = Array.new
+		if !a
+			n.neighbors.each{|el|
+				if no_cross(n, el, b) < 0
+#@pic.save
+#				@pic.set_source_rgba(0, 1, 0, 1)
+#				gen_line(n.vertex.x, n.vertex.y, el.vertex.x, el.vertex.y, 2)
+#@pic.restore
+l << el
+				end
+				}
+			l.delete(b)
+			return l
+		elsif !b
+			n.neighbors.each{|el|
+				if no_cross(n, a, el) < 0
+					l << el
+				end
+				}
+			l.delete(a)
+			return l
+		end
+
+
+		aax = n.vertex.x - a.vertex.x - a.ox
+		aay = n.vertex.y - a.vertex.y - a.oy
+		bbx = b.vertex.x - n.vertex.x + b.ox
+		bby = b.vertex.y - n.vertex.y + b.ox
+		as = aay.fdiv(aax)
+		bs = bby.fdiv(bbx)
+		#l = Array.new
+		n.neighbors.each{|el|
+
+		ex =  el.vertex.x + el.ox
+		ey =  el.vertex.y + el.oy
+
+		if aax*bby-aay*bbx>0
+			if (aax * (ey - n.vertex.y) - aay * (ex - n.vertex.x) > 0) and (bbx * (ey - n.vertex.y) - bby * (ex - n.vertex.x) > 0)
+				l << el
+			end
+		else
+			if (aax * (ey - n.vertex.y) - aay * (ex - n.vertex.x) > 0) or (bbx * (ey - n.vertex.y) - bby * (ex - n.vertex.x) > 0)
+				l << el
+			end
+
+		end
+		}
+		l.delete(a)
+		l.delete(b)
+		return l
+	end
+
+
+
+	def inner_angle(o, a, b)
+		ax = a.x - o.x
+		ay = a.y - o.y
+		bx = b.x - o.x
+		by = b.y - o.y
+		d = (Math.atan2(by, bx) - Math.atan2(ay, ax)).abs
+		d =  2 * Math::PI - d if d > Math::PI
+		d
+	end
+
+	def cross(o, a, b)
+		(a.x - o.x) * (b.y - o.y) - (a.y - o.y) * (b.x - o.x)
+	end
+
+	def cross_tangents(a, b, c, id)
+		last_step, cur_step, nxt_step = a.net(id), b.net(id), c.net(id)
+		unless 	last_step && cur_step && nxt_step
+puts id, last_step, cur_step, nxt_step
+		end
+		t1 = get_tangents(a.x, a.y, last_step.radius, last_step.rgt, b.x, b.y, cur_step.radius, cur_step.rgt)
+		t2 = get_tangents(b.x, b.y, cur_step.radius, cur_step.rgt, c.x, c.y, nxt_step.radius, nxt_step.rgt)
+		((t1[2] - t1[0]) * (t2[3] - t2[1]) - (t1[3] - t1[1]) * (t2[2] - t2[0])) > 0
+	end
+
+
+	def atan2_tangents(a, b, id)
+		last_step, cur_step = a.net(id), b.net(id)
+		t1 = get_tangents(a.x, a.y, last_step.radius, last_step.rgt, b.x, b.y, cur_step.radius, cur_step.rgt)
+		#if a.id == 48 || b.id == 48
+		#gen_line(t1[0], t1[1], t1[2], t1[3], 9)
+		#end
+		#t2 = get_tangents(b.x, b.y, cur_step.radius, cur_step.rgt, c.x, c.y, nxt_step.radius, nxt_step.rgt)
+		Math.atan2(t1[3] - t1[1], t1[2] - t1[0])
+		#Math.atan2(t1[1] - t1[3], t1[0] - t1[2])
+		#((t1[2] - t1[0]) * (t2[3] - t2[1]) - (t1[3] - t1[1]) * (t2[2] - t2[0])) > 0
+	end
+
+
+
+	def old_new_bor_list(a, b, n)
+		a, b, n = a.vertex, b.vertex, n.vertex
+		aax = a.x - n.x
+		aay = a.y - n.y
+		bbx = b.x - n.x
+		bby = b.y - n.y
+		l = Array.new
+		aa = Math.atan2(aay, aax)
+		ab = Math.atan2(bby, bbx)
+		ab, aa = aa, ab if aa > ab
+		n.neighbors.each{|el|
+			an = Math.atan2(el.y - n.y, el.x - n.x)
+			if ab - aa < Math::PI
+				l << el if an > aa && an < ab
+			else
+				l << el if an < aa || an > ab
+			end
+		}
+		l.delete(a)
+		l.delete(b)
+		return l
+	end
+
+#     a
+#    /
+#   /   select these neighbors of n
+#  /    in inner angle < PI
+# n_______b
+	def new_bor_list(a, b, n)
+		a, b, n = a.vertex, b.vertex, n.vertex
+		nx, ny = n.xy
+		aa = Math.atan2(a.y - ny, a.x - nx)
+		ab = Math.atan2(b.y - ny, b.x - nx)
+		ab, aa = aa, ab if aa > ab
+		t = (ab - aa > Math::PI) # invert selection?
+		n.neighbors.select{|el|
+			if el == a || el == b
+				false
+			else
+				(aa..ab).include?(Math.atan2(el.y - ny, el.x - nx)) != t
+			end
+		}
+	end
+
+	def unused_slow_bor_list(a, b, n)
+		a, b, n = a.vertex, b.vertex, n.vertex
+		aax = n.x - a.x
+		aay = n.y - a.y
+		bbx = b.x - n.x
+		bby = b.y - n.y
+		l = Array.new
+		n.neighbors.each{|el|
+		el_x_a = aax * (el.y - n.y) - aay * (el.x - n.x)
+		el_x_b = bbx * (el.y - n.y) - bby * (el.x - n.x)
+		if aax*bby-aay*bbx>0
+			if el_x_a > 0 && el_x_b > 0
+				l << el
+			end
+		else
+			if el_x_a < 0 && el_x_b < 0
+				l << el
+			end
+		end
+		}
+		l.delete(a)
+		l.delete(b)
+		return l
+	end
+
+	def bor_list(a, b, n)
+		a, b, n = a.vertex, b.vertex, n.vertex
+		aax = n.x - a.x
+		aay = n.y - a.y
+		bbx = b.x - n.x
+		bby = b.y - n.y
+		s = (aax * bby < aay * bbx)
+		n.neighbors.select{|el| (el != a) && (el != b) && ((aax * (el.y - n.y) > aay * (el.x - n.x))) ^ s && ((bbx * (el.y - n.y) > bby * (el.x - n.x))) ^ s}
+	end
+
+	def old_bor_list(a, b, n)
+		aax = n.vertex.x - a.vertex.x
+		aay = n.vertex.y - a.vertex.y
+		bbx = b.vertex.x - n.vertex.x
+		bby = b.vertex.y - n.vertex.y
+		l = Array.new
+		n.neighbors.each{|el|
+		el_x_a = aax * (el.vertex.y - n.vertex.y) - aay * (el.vertex.x - n.vertex.x)
+		el_x_b = bbx * (el.vertex.y - n.vertex.y) - bby * (el.vertex.x - n.vertex.x)
+		if aax*bby-aay*bbx>0
+			if el_x_a > 0 && el_x_b > 0
+				l << el
+			end
+		else
+			if el_x_a < 0 && el_x_b < 0
+				l << el
+			end
+		end
+		}
+		l.delete(a)
+		l.delete(b)
+		return l
+	end
+
+	def unused_convex_2_concave(path) # path of regions
+	fail if path[0].convex || path[-1].convex
+		res = Array.new
+		path.each_with_index{|p, i|	
+			if p.convex
+			fail if i == 0
+			puts 'beeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeep'
+				p.convex = false
+				fail if i == 0 || i == path.length - 1
+				nxt = path[i + 1]
+				prv = path[i - 1]
+
+
+				fail unless prv && nxt
+				#vl = p.neighbors - old_bor_list(prv, p, nxt) - [prv, nxt]
+				vl = p.neighbors - old_bor_list(nxt, p, prv) - [prv, nxt]
+				puts p.neighbors, '-', old_bor_list(nxt, p, prv), '-'
+				puts old_bor_list(prv, p, nxt), '-', [prv, nxt]
+				#puts vl
+				puts ':'
+				puts path
+				fail unless (path & vl).empty?
+				fail if vl.empty?
+				z =  Math.atan2(prv.vertex.y - p.vertex.y, prv.vertex.x - p.vertex.x)
+				vl.sort_by!{|el| Math.atan2(el.vertex.y - p.vertex.y, el.vertex.x - p.vertex.x) - z}
+				#vl.sort_by!{|el| Math.atan2(el.y - p.vertex.y, el.x - p.vertex.x) - z}
+				#f = vl[0].vertex
+				#vl.reverse! unless (f.x - prv.vertex.x) ** 2 + (f.y - prv.vertex.y) ** 2 < (f.x - prv.vertex.x) ** 2 + (f.y - prv.vertex.y) ** 2
+				res += vl
+			else
+				res << p
+			end
+			prv = p
+		}
+		res
+	end
+
+# r1, r2 are the just splitted regions due to the newly attached net
+# path r1<->x should be blocked, because it would cross the incident net
+#    | /x
+# -- r-----
+#  r1||r2
+	def block_paths(r1, r2, r)
+	#return
+		n = r.neighbors # n includes r1 and r2
+		#z = Math.atan2(r1.vertex.y - r.vertex.y, r1.vertex.x - r.vertex.x)
+		n.each{|el| el.a = Math.atan2(el.vertex.y - r.vertex.y, el.vertex.x - r.vertex.x)}
+		z = r1.a
+		fail unless z
+		n.each{|el| if el.a < z then el.a += 2 * Math::PI; end}
+		#r1.a = 0
+		r2.a = r1.a + 2 * Math::PI
+		n.combination(2).each{|el|
+			a, b = *el
+			if (a.a - b.a).abs >= Math::PI
+			puts 'bluuu'
+				@block_hash[r, a, b] = true
+
+			#else
+				#if !r.allowed_pairs.inlude?([])
+				r.restricted_pairs << [a, b]
+				r.restricted_pairs.delete([b, a])
+			end
+
+		}
+	end
+
+
+	def old_copy_blocked_paths(r, r1, r2)
+		n = r.neighbors
+		n1 = r1.neighbors
+		n2 = r2.neighbors
+		n.combination(2).each{|el|
+			a, b = *el
+			if @block_hash[r, a, b]
+			puts 'aaa'
+				if n1.include?(a) || n1.include?(b)
+				puts 'bbb'
+					@block_hash[r1, a, b] = true
+				end
+				if  n2.include?(a) || n2.include?(b)
+				puts 'ccc'
+					@block_hash[r2, a, b] = true
+				end
+@block_hash[r, a, b] = false
+			end
+		}
+	end
+
+
+
+
+	def copy_blocked_paths(r, r1, r2)
+		n = r.neighbors
+n.each{|e|
+
+		e.neighbors.combination(2).each{|el|
+			a, b = *el
+
+			if @block_hash[e, a, b]
+
+				if a == r
+				@block_hash[e, a, b] = false
+				@block_hash[e, r1, b] = true
+				@block_hash[e, r2, b] = true
+				elsif b == r
+				@block_hash[e, a, b] = false
+				@block_hash[e, a, r1] = true
+				@block_hash[e, a, r2] = true
+				end
+			end
+
+				#@block_hash[r, a, b] = false
+
+
+
+
+
+}
+}
+
+
+
+
+
+		n1 = r1.neighbors
+		n2 = r2.neighbors
+		n.combination(2).each{|el|
+			a, b = *el
+			if @block_hash[r, a, b] || @block_hash[r, b, a]
+puts 'bloooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooo'
+
+@block_hash[r1, a, b] = true
+@block_hash[r2, a, b] = true
+
+
+#			puts 'aaa'
+##				if n1.include?(a) || n1.include?(b)
+#				puts 'bbb'
+#					@block_hash[r1, a, b] = true
+#				end
+#				if  n2.include?(a) || n2.include?(b)
+#				puts 'ccc'
+#					@block_hash[r2, a, b] = true
+#				end
+				@block_hash[r, a, b] = false
+			end
+		}
+	end
+
+
+	def route(net_id)
+		net_desc = @netlist[net_id]
+		from, to = net_desc.name1, net_desc.name2
+		return nil unless from
+		start_node = nil
+    @regions.each{|r|
+		if r.incident
+		#print  r.vertex.name, '__', from, "\n"
+	    if r.vertex.name == from
+        start_node = r
+				break
+		  end
+		end
+		}
+		#puts net_id
+fail unless start_node
+		parents = dijkstra(start_node, to)
+		if parents.empty?
+puts 'dijkstra failed!'
+return
+		end
+
+
+#parents = convex_2_concave(parents)
+
+
+		ffirst = parents[-1]
+		llast = parents[0] 
+
+#if parents.length == 2
+#			ffirst.neighbors.delete_if{|el| el == llast}
+#			llast.neighbors.delete_if{|el| el == ffirst}
+#end
+
+
+
+
+		r1 = r2 = nil
+		#cur = parents[-1]
+		prv = nil
+		#@pic.move_to(cur.vertex.x, cur.vertex.y)
+		bas = parents.length
+		while (bas -= 1) >= 0 do
+		cur = parents[bas]
+			nxt = (bas > 0 ? parents[bas - 1] : nil)
+			#if true#prv && nxt
+			
+			
+			
+
+			if prv && nxt
+				ne = no_split_neighbor_list(prv, nxt, cur)
+
+if !cur.outer
+cur.neighbors.each{|el|
+if ((el.vertex.x == prv.vertex.x) && (el.vertex.y == prv.vertex.y)) || ((el.vertex.x == nxt.vertex.x) && (el.vertex.y == nxt.vertex.y))
+#ne << el
+
+#else
+###ne.delete(el)
+
+end
+}
+else
+
+
+end
+#ne.uniq!
+#ne.delete(nxt)
+#ne.delete(prv)
+
+				cap = 1e4
+				ne.each{|r|
+					if (i = @cuts[cur.vertex.x, cur.vertex.y, r.vertex.x, r.vertex.y].cap) < cap then cap = i end
+				}
+				ne_comp = ((cur.neighbors - ne) - [prv, nxt])#.uniq
+
+
+if cur.outer
+cur.neighbors.each{|el|
+if ((el.vertex.x == prv.vertex.x) && (el.vertex.y == prv.vertex.y)) || ((el.vertex.x == nxt.vertex.x) && (el.vertex.y == nxt.vertex.y))
+#ne << el
+
+#else
+###ne_comp.delete(el)
+
+unless ne.include?(el)
+###ne << el
+end
+
+end
+}
+else
+
+
+end
+
+
+
+				ne << nxt if nxt
+				ne_comp << nxt if nxt
+				if r1
+					ne.delete(r1)
+					ne.delete(r2)
+					ne_comp.delete(r1)
+					ne_comp.delete(r2)
+					ne << r1
+					ne_comp << r2
+				else
+					ne << prv if prv
+					ne_comp << prv if prv
+				end
+				@regions.delete(cur)
+				r1 = Region.new(cur.vertex)
+				r2 = Region.new(cur.vertex)
+				copy_blocked_paths(cur, r1, r2)
+				r1.restricted_pairs = cur.restricted_pairs.dup
+				r2.restricted_pairs = cur.restricted_pairs.dup
+				cur.neighbors.each{|el|
+
+					#if el.restricted_pairs.include?
+					#
+					#
+					#sub = Array.new
+					sub = Set.new []
+					el.restricted_pairs.delete_if{|p|
+						a, b = *p
+						if a == cur
+							sub << [r1, b] << [r2, b]
+						elsif b == cur
+							sub << [a, r1] << [a, r2]
+						end
+						(a == cur) || (b == cur)
+					}
+					#el.restricted_pairs += sub
+					el.restricted_pairs |= sub
+					
+
+
+=begin
+					sub = nil
+					el.restricted_pairs.each{|p|
+						a, b = *p
+						if a == cur
+							sub = [p, [r1, b], [r2, b]]
+							#p << [r1, b]
+							#p << [r2, b]
+						elsif b == cur
+							sub = [p, [a, r1], [a, r2]]
+							#p << [a, r1]
+							#p << [a, r2]
+						end
+					}
+					if sub
+						el.restricted_pairs.delete(sub[0])
+						#el.restricted_pairs.add(sub[1])
+						#el.restricted_pairs.add(sub[2])
+						el.restricted_pairs.push(sub[1])
+						el.restricted_pairs.push(sub[2])
+					end
+=end
+				}
+						
+
+
+				if !cur.incident
+				r1.incident = false
+				r2.incident = false
+
+				end
+				if !cur.outer_allowed
+				r1.outer_allowed = false
+				r2.outer_allowed = false
+				end
+
+
+
+				r1.name='r1'
+				r2.name='r2'
+
+				#h = cur.g
+				r1.g = r2.g = cur.g * 0.5
+				#r1.ox = r2.ox = cur.ox
+				#r1.oy = r2.oy = cur.oy
+
+				dy = (nxt.vertex.x - prv.vertex.x)# * cur.g
+				dx = -(nxt.vertex.y - prv.vertex.y)# * cur.g
+				h = Math::sqrt(dx ** 2 + dy ** 2) / cur.g
+				dx = dx / h
+				dy = dy / h
+
+puts 'xxxxxxxxxxx', dx, dy
+#=begin
+				dx1 = nxt.vertex.x - cur.vertex.x
+				dy1 = nxt.vertex.y - cur.vertex.y
+				h = Math::hypot(dx1, dy1)
+				dx1 /= h
+				dy1 /= h
+				dx2 = cur.vertex.x - prv.vertex.x
+				dy2 = cur.vertex.y - prv.vertex.y
+				h = Math::hypot(dx2, dy2)
+				dx2 /= h
+				dy2 /= h
+
+				dy = (dx1 + dx2)
+				dx =  -(dy1 + dy2)
+				h = Math::hypot(dx, dy) / cur.g
+				dx /= h 
+				dy /= h
+				
+puts 'yyyyyyyyyyyyy', dx, dy
+#=end
+
+				r1.ox = cur.ox + dx #- 1
+				r1.oy = cur.oy + dy #- 1
+				r2.ox = cur.ox - dx #+ 1
+				r2.oy = cur.oy - dy #+ 1
+
+
+
+
+
+
+				@regions << r1 << r2
+				cur.neighbors.each{|el|
+					el.neighbors.delete(cur)
+#					el.neigl.delete(cur)
+#					el.neigr.delete(cur)
+#
+				}
+#
+#puts 'rr',  ne, 'ccc', cur
+				ne.each{|el|
+					#el.replace_neighbors(cur, r1)
+					#r1.duplicate_neighbors(cur, el)
+					el.neighbors << r1
+					r1.neighbors << el
+
+				}
+				ne_comp.each{|el|
+					#el.replace_neighbors(cur, r2)
+					#r2.duplicate_neighbors(cur, el)
+
+					el.neighbors << r2
+					r2.neighbors << el
+				}
+
+#				cur.neighbors.each{|el|
+#					el.neighbors.delete(cur)
+#					el.neigl.delete(cur)
+#					el.neigr.delete(cur)
+#				}
+#				cur.neigl.each{|el|
+#					el.neighbors.delete(cur)
+#					el.neigl.delete(cur)
+#					el.neigr.delete(cur)
+#				}
+#				cur.neigr.each{|el|
+#					el.neighbors.delete(cur)
+#					el.neigl.delete(cur)
+#					el.neigr.delete(cur)
+#				}
+
+
+
+
+				#copy_blocked_paths(cur, r1, r2)
+			if nxt == llast
+			#nxt.fix_lr(r1, r2)
+
+			#nxt.neighbors.delete_if{|el| el == r1 || el == r2}
+			#r1.neighbors.delete_if{|el| el == nxt}
+			#r2.neighbors.delete_if{|el| el == nxt}
+
+
+
+
+
+			puts 'block_path'
+				block_paths(r2, r1, nxt)
+			end
+
+
+		if prv == ffirst
+			#prv.fix_lr(r2, r1)
+
+			#prv.neighbors.delete_if{|el| el == r1 || el == r2}
+			#r1.neighbors.delete_if{|el| el == prv}
+			#r2.neighbors.delete_if{|el| el == prv}
+
+			
+
+
+			puts 'block_path'
+				#block_paths(r2, r1, prv)
+				block_paths(r1, r2, prv)
+			end
+
+
+
+			end
+			if prv && nxt
+			#fail if (cross_abc(prv, cur, nxt)>0) != cur.lr_turn
+			#if (cross_abc(prv, cur, nxt)>0) ^ cur.outer
+			if cur.lr_turn ^ cur.outer
+				r1.incident = false
+				#r1.outer_allowed = false
+			else
+				r2.incident = false
+				#r2.outer_allowed = false
+
+			end
+			if true#cur.outer
+				r2.outer_allowed = false
+				r1.outer_allowed = false
+
+			if (no_cross(prv, cur, nxt)>0)
+				#r1.outer_allowed = false
+			else
+				#r2.outer_allowed = false
+			end
+			end
+
+			end
+			#if out[cur]
+			#	prev = parents[cur]
+			#	puts 'out'
+			#	if prev
+			#		@pic.new_sub_path
+			#		@pic.arc(prev.vertex.x, prev.vertex.y, 20, 0, 2 * Math::PI)
+			#		@pic.stroke
+			#	end
+			#end
+			prv && @pic.move_to(prv.vertex.x, prv.vertex.y)
+			@pic.line_to(cur.vertex.x, cur.vertex.y)
+			@pic.stroke
+      prv = cur
+			#cur = nxt
+		end
+		@pic.stroke
+		#cur = prv = parents[to]
+		#p = Array.new
+		#
+		#
+		parents.each{|el| el.vertex.outer = el.outer; el.vertex.lr_turn = el.lr_turn}
+		p = parents.map{|el| el.vertex}
+#		while cur
+#			v = cur.vertex
+#			#v.out = out[prv]
+#			p << v
+#			prv = cur
+#			cur = parents[cur]
+#		end
+		pa = Array.new
+		pa << p[-1]
+		i = p.length - 2
+		while i > 0
+			if cross(p[i - 1], p[i], p[i + 1])
+				pa << p[i]
+			else
+				pa << p[i]
+			end
+			i -= 1
+		end
+		pa << p[0]
+		path = Array.new
+		pa.each_index{|i|  
+			cur = pa[i]
+			nxt = (i == pa.length - 1 ? nil : pa[i + 1])
+			prv = (i == 0 ? nil : pa[i - 1])
+			if prv and nxt
+				path << pa[i]
+			else
+				path << pa[i]
+			end
+		}
+		pstep = nil
+		path.each_index{|i|  
+			cur = path[i]
+			nxt = (i == path.length - 1 ? nil : path[i + 1])
+			prv = (i == 0 ? nil : path[i - 1])
+			step = Step.new(prv , nxt, @Path_ID)
+			step.rgt = false
+			step.outer = cur.outer
+			step.lr_turn = cur.lr_turn
+			puts 'eeeeeeeeeeeeeeeeeeeeeee'if step.outer 
+
+			cur.outer = false
+			step.net_desc = net_desc
+			step.vertex = cur
+			step.pstep = pstep
+			pstep = step
+			if prv and nxt
+				cur.update(step)
+
+				#step.lft = (cross(prv, cur, nxt) > 0)
+				#step.rgt = cur.out
+#step.rgt =	!step.lft
+#fail if (cross(prv, cur, nxt) <= 0) != (!cur.lr_turn)
+#step.rgt = step.outer ^ (cross(prv, cur, nxt) <= 0)
+step.rgt = step.outer ^ (!cur.lr_turn)
+#step.rgt = cross(prv, cur, nxt) <= 0
+
+#step.ct = ! step.rgt
+step.ct =  (step.rgt ^ (!step.outer))
+step.xt = !step.outer
+#fail if step.ct == step.rgt
+				cur.attached_nets << step
+			else
+				cur.incident_nets << step
+			end
+		}
+		@Path_ID += 1
+
+		s = pstep
+		s.nstep = nil
+		while p = s.pstep
+			p.nstep = s
+			s = p
+		end
+	end
+
+	# http://en.wikipedia.org/wiki/Tangent_lines_to_circles
+	# http://www.ambrsoft.com/TrigoCalc/Circles2/Circles2Tangent_.htm
+	# https://en.wikibooks.org/wiki/Algorithm_Implementation/Geometry/Tangents_between_two_circles
+	def get_tangents(x1, y1, r1, l1, x2, y2, r2, l2)
+		#d_sq = (x1 - x2) ** 2 + (y1 - y2) ** 2
+		#if d_sq <=  (r1 - r2) ** 2
+		#	fail 'get_tangents: circles fully overlap!'
+		#end
+		d = Math.hypot(x1 - x2, y1 - y2)
+		vx = (x2 - x1) / d
+		vy = (y2 - y1) / d
+		r2 *= (l1 == l2  ? 1 : -1)
+		c = (r1 - r2) / d
+		h = 1 - c ** 2
+		if h < 0
+puts r1, r2, c, d, h
+#fail
+		end
+		#fail if h < 0
+		h = 0 if h < 0 # wrong -- only for inspection
+		h = Math.sqrt(h) * (l1  ? -1 : 1)
+		nx = vx * c - h * vy
+		ny = vy * c + h * vx
+		[x1 + r1 * nx, y1 + r1 * ny, x2 + r2 * nx,  y2 + r2 * ny]
+	end
+
+	def unused_get_tangents(x1, y1, r1, l1, x2, y2, r2, l2)
+		d_sq = (x1 - x2) * (x1 - x2) + (y1 - y2) * (y1 - y2)
+		if (d_sq <= (r1-r2)*(r1-r2))
+			puts x1, y1, r1, x2, y2, r2
+			fail
+		end
+		d = Math.sqrt(d_sq)
+		vx = (x2 - x1) / d
+		vy = (y2 - y1) / d
+		sign2 = sign1 = 1
+		sign2 = (l2  ? -1 : 1)
+		sign1 = (l1  ? -1 : 1)
+		sign2 *= sign1
+		c = (r1 - sign2 * r2) / d
+		fail if c < 0
+		#if (c*c > 1.0) continue;
+		h = Math.sqrt([0.0, 1.0 - c*c].max)
+		nx = vx * c - sign1 * h * vy
+		ny = vy * c + sign1 * h * vx
+		a = Array.new(4)
+		a[0] = x1 + r1 * nx
+		a[1] = y1 + r1 * ny
+		a[2] = x2 + sign2 * r2 * nx
+		a[3] = y2 + sign2 * r2 * ny
+		return a
+	end
+
+	def smart_replace(step, list)
+		if list.empty?
+			ps = step.pstep
+			ns = step.nstep
+ 			ps.next = step.next
+ 			ns.prev = step.prev
+			ps.nstep = ns
+			ns.pstep = ps
+		else
+		  pstep = step.pstep
+			pv = step.prev
+			list.each{|v|
+				n = Step.new(pv, nil, step.id)
+				n.convex = true # obsolete!
+				n.net_desc = step.net_desc
+				n.vertex = v
+				n.pstep = pstep
+				pstep.nstep = n #if pstep
+				pstep.next = v 
+				pstep = n
+				pv = v
+				n.rgt = n.ct = !step.rgt
+				n.outer = true # obsolete?
+				v.update(n)
+				v.attached_nets << n
+			}
+			pstep.next = step.next
+			pstep.nstep = step.nstep
+			pstep.nstep.prev = pv
+			pstep.nstep.pstep = pstep
+		end
+		step.vertex.new_delete_net(step)
+	end
+
+	def replace(vertex, id, list)
+		if list.empty?
+			step = vertex.net(id)
+ 			step.next.net(id).prev = step.prev
+ 			step.prev.net(id).next = step.next
+			step.pstep.nstep = step.nstep
+			step.nstep.pstep = step.pstep
+		else
+
+		#puts 'replace_insert'
+		  pstep = nil
+			list.each_index{|i|
+				n = Step.new(list[i - 1], list[i + 1], id)
+				n.convex = true
+				#n.outer = true
+				n.net_desc = @netlist[id]
+				#puts 'id', id
+				fail unless n.net_desc
+				n.vertex = list[i]
+				n.pstep = pstep
+				pstep = n
+				n.rgt = !vertex.net(id).rgt
+				n.ct = n.rgt
+				n.outer = true
+				if i == 0
+					n.prev = vertex.net(id).prev
+					n.prev.net(id).next = list[0]
+					n.pstep = vertex.net(id).pstep
+					#n.prev.net(id).nstep = list[0]
+				end
+				if i == list.length - 1
+					n.next = vertex.net(id).next
+					n.next.net(id).prev = list[i]
+					n.next.net(id).pstep = n
+					n.nstep = vertex.net(id).nstep
+
+				end
+				#list[i].append_step(n)
+				fail unless n.net_desc
+				list[i].update(n)
+				list[i].attached_nets << n
+			}
+
+		i = list.length
+		s = pstep
+		#s.nstep = nil
+		while i > 0
+		  i -= 1
+		  p = s.pstep
+			p.nstep = s
+			s = p
+		end
+
+		end
+		vertex.delete_net(id)
+	end
+
+
+
+
+
+
+
+
+	def init_vertices
+		@vertices.each{|vert|
+			vert.radius = Pin_Radius 
+			vert.separation = Clearance 
+		}
+	end
+
+	# sort attached nets and calculate its radii
+	def no_prepare_steps
+		@vertices.each{|vert|
+			#vert.attached_nets.sort!{|a, b| inner_angle(a.prev, vert, a.next) <=> inner_angle(b.prev, vert, b.next)}
+			#last_sep = vert.separation
+			#sum = vert.radius
+			
+			vert.reset_initial_size
+			vert.attached_nets.each{|step|
+
+			net = step.net_desc
+
+			trace_sep = [vert.separation, net.separation].max
+			vert.radius += trace_sep + net.thickness
+			step.radius = vert.radius - net.thickness * 0.5
+			vert.separation = net.separation
+
+			  #net = @netlist[step.id]
+				#s = [net.separation, last_sep].max
+				#step.radius = sum + s + net.thickness * 0.5
+				#sum += s + net.thickness
+				#last_sep = net.separation
+			}
+		}
+	end
+
+	#\   |   /
+	# \  |  /
+	#  \ | /  3 attached concave nets not overlapping
+	#    O ------------
+	#     \ -----
+	#      \
+	#       \
+	#        \
+	# sort attached nets and calculate its radii.
+	# this should work for concave (before attachment operator is applied) and convex final nets
+	# regard groups by angle: overlapping angles needs different radii for arcs,
+	# non overlapping attached arcs may have the same radius.
+	# generally one terminal should have at least two final convex groups -- but a terminal with
+	# a very big radius may have more than 2 attached groups.
+	# Indeed nets never cross, so overlapping is full including
+	# currently we collect all attached nets of a terminal in one single array called
+	# attached_nets -- we may consider using a separate array for each group...
+	# maybe we should regard minimal gap as overlapping? Introduce an eps?
+	def smart_prepare_steps
+		@vertices.each{|vert|
+			next if vert.attached_nets.empty?
+			vert.attached_nets.each{|s|
+				s.g = -1
+				#a = Math.atan2(s.next.y - s.vertex.y, s.next.x - s.vertex.x) # basic angle
+				#b = Math.atan2(s.prev.y - s.vertex.y, s.prev.x - s.vertex.x)
+				a = atan2_tangents(s.vertex, s.next, s.id) # -PI <= angle <= PI
+				b = atan2_tangents(s.prev, s.vertex, s.id) # wrong direction, we have to flip
+				b < 0 ? b += Math::PI : b -= Math::PI
+				d = (a - b).abs
+				dir = (a + b) * 0.5
+				if  d > Math::PI # select inner angle < PI -- and flip direction
+					d = 2 * Math::PI - d
+					dir < 0 ? dir += Math::PI : dir -= Math::PI
+				end
+				s.d = d * 0.5
+				s.dir = dir
+			}
+			nets = vert.attached_nets.sort_by{|s| s.dir}
+			i = nets.length
+			last = nets[0]
+			last.dir += 2 * Math::PI
+			last.g = group = 0
+			while (i -= 1) > 0 do # backward while in group 0, start with largest angle
+				nxt = nets[i]
+				break if nxt.dir + nxt.d < last.dir - last.d
+				nxt.g = 0
+				last = nxt
+			end
+			i = 0
+			last = nets[0]
+			last.dir -= 2 * Math::PI # undo above fix
+			while (i += 1) < nets.length do # forward
+				nxt = nets[i]
+				break if nxt.g == 0
+				if nxt.dir - nxt.d > last.dir + last.d
+					group += 1
+				end
+				nxt.g = group
+				last = nxt
+			end
+			group = 0
+			loop do
+				vert.reset_initial_size
+				group_found = false
+				vert.attached_nets.each{|step|
+					if step.g == group
+						group_found = true
+						net = step.net_desc
+						trace_sep = [vert.separation, net.separation].max
+						vert.radius += trace_sep + net.thickness
+						step.radius = vert.radius - net.thickness * 0.5
+						vert.separation = net.separation
+					end
+				}
+				break unless group_found
+				group += 1
+			end
+		}
+	end
+
+	def old_smart_prepare_steps
+		@vertices.each{|vert|
+			next if vert.attached_nets.empty?
+			vert.attached_nets.each{|s|
+				s.g = -1
+				s.a = Math.atan2(s.next.y - s.vertex.y, s.next.x - s.vertex.x)
+				s.b = Math.atan2(s.prev.y - s.vertex.y, s.prev.x - s.vertex.x)
+				s.a = atan2_tangents(s.vertex, s.next, s.id)
+				s.b = atan2_tangents(s.prev, s.vertex, s.id)
+				s.b += Math::PI
+				if s.b > Math::PI
+					s.b -= 2 * Math::PI
+				end
+				s.b, s.a = [s.a, s.b].sort
+			}
+			nets = vert.attached_nets
+			group = 0
+			lamy = ->(step) {
+				nets.each{|s|
+					unless s.g > -1
+						if step.a - step.b > Math::PI
+							touch = (s.a > step.a || s.a < step.b) || (s.b > step.a || s.b < step.b)
+						else
+							touch = (s.a > step.a && s.a < step.b) || (s.b > step.a && s.b < step.b)
+						end
+						#print touch, ' ', group, "\n"
+						if touch
+							s.g = group
+							lamy[s]
+						end
+						s.g=0
+					end
+				}
+			}
+			group = 0
+			nets.each{|net|
+			if net.g == -1
+				net.g = group
+			#end
+				lamy[net]
+				end
+				group += 1
+			}
+			group = 0
+			loop do
+				vert.reset_initial_size
+				group_found = false
+				vert.attached_nets.each{|step|
+					if step.g == group
+						group_found = true
+						net = step.net_desc
+						trace_sep = [vert.separation, net.separation].max
+						vert.radius += trace_sep + net.thickness
+						step.radius = vert.radius - net.thickness * 0.5
+						vert.separation = net.separation
+					end
+				}
+				break unless group_found
+				group += 1
+			end
+		}
+	end
+
+
+	# sort attached nets and calculate its radii
+	def old_prepare_steps
+		@vertices.each{|vert|
+		o = true
+			next if vert.attached_nets.empty?
+			vert.reset_initial_size
+			vert.attached_nets.each{|step|
+			if o && step.outer
+			o = false
+vert.reset_initial_size
+
+			end
+				net = step.net_desc
+				trace_sep = [vert.separation, net.separation].max
+				vert.radius += trace_sep + net.thickness
+				step.radius = vert.radius - net.thickness * 0.5
+				vert.separation = net.separation
+			}
+		}
+	end
+
+
+	# sort attached nets and calculate its radii
+	def prepare_steps
+		@vertices.each{|vert|
+			next if vert.attached_nets.empty?
+			vert.reset_initial_size
+
+
+
+			vert.attached_nets.each{|step|
+			#vert.attached_nets.reverse_each{|step|
+				next unless !step.xt #step.outer
+				puts '123'
+				#fail unless step.rgt == step.ct #step.outer
+				net = step.net_desc
+				trace_sep = [vert.separation, net.separation].max
+				vert.radius += trace_sep + net.thickness
+				step.radius = vert.radius - net.thickness * 0.5
+				vert.separation = net.separation
+			}
+#begin
+			#vert.reset_initial_size
+			#vert.attached_nets.reverse_each{|step|
+			vert.attached_nets.each{|step|
+				next if !step.xt #step.outer
+				puts '321'
+				net = step.net_desc
+				trace_sep = [vert.separation, net.separation].max
+				vert.radius += trace_sep + net.thickness
+				step.radius = vert.radius - net.thickness * 0.5
+				vert.separation = net.separation
+			}
+#end
+
+
+		}
+	end
+
+
+
+	# sort attached nets and calculate its radii
+	def lazy_prepare_steps
+		@vertices.each{|vert|
+			next if vert.attached_nets.empty?
+			[true, false].each{|b|
+				vert.reset_initial_size
+				vert.attached_nets.each{|step|
+					if step.rgt == b
+						net = step.net_desc
+						trace_sep = [vert.separation, net.separation].max
+						vert.radius += trace_sep + net.thickness
+						step.radius = vert.radius - net.thickness * 0.5
+						vert.separation = net.separation
+					end
+				}
+			}
+		}
+	end
+
+	def sort_attached_nets
+		@vertices.each{|vert| vert.sort_attached_nets}
+	end
+
+  def nubly(collapse = false)
+	#return
+	  replaced = true
+		while replaced do
+			replaced = false
+			@vertices.each{|cur|
+				cur.attached_nets.reverse_each{|step|
+					prev_step, nxt_step = step.pstep, step.nstep
+					pv, cv, nv = step.prev, cur, step.next
+					x1, y1, x2, y2	= get_tangents(pv.x, pv.y, prev_step.radius, prev_step.rgt, cv.x, cv.y, step.radius, step.rgt)
+					x3, y3, x4, y4	= get_tangents(cv.x, cv.y, step.radius, step.rgt, nv.x, nv.y, nxt_step.radius, nxt_step.rgt)
+					x2, y2, x3, y3 = line_line_intersection(x1, y1, x2, y2, x3, y3, x4, y4) # get crossing point and ua, ub
+					step.xt = (x2 != nil) && ((x3 > 0 && x3 < 1) || (y3 > 0 && y3 < 1))
+					if collapse && step.xt
+						fail if pv == nv
+						replaced = true
+						hx = x4 - x1
+						hy = y4 - y1
+						if step.rgt
+							vec_x, vec_y = hy, -hx
+						else
+							vec_x, vec_y = -hy, hx
+						end
+						hv1 = Vertex.new(x1, y1)
+						hv2 = Vertex.new(x2, y2)
+						hv3 = Vertex.new(x4, y4)
+						#hv4 = Vertex.new(x1 + (hx + vec_x) * 0.5, y1 + (hy + vec_y) * 0.5)
+						hv4 = Vertex.new(x1 + hx * 0.5 + vec_x, y1 + hy * 0.5 + vec_y)
+						rep = vertices_in_polygon([hv1, hv2, hv3, hv4], @vertices) - [pv, cv, nv]
+						net = step.net_desc
+						rep.each{|v|
+							v.trgt = !step.rgt
+							v.tradius = v.radius + [net.separation, v.separation].max + net.thickness * 0.5
+						}
+						pv.trgt = step.pstep.rgt
+						pv.tradius = step.pstep.radius
+						nv.trgt = step.nstep.rgt
+						nv.tradius = step.nstep.radius
+						rep = new_convex_vertices(rep, pv, nv) - [pv, nv]
+						smart_replace(step, rep)
+					end
+				}
+			}
+		end
+	end
+
+
+
+	def draw_routes
+		set_color(0, 0, 0, 1)
+		@vertices.each{|vert|
+if false#vert.cid == -1
+						@pic.set_source_rgba(1, 0, 0, 1)# if last_net.rgt #== last_net.ct
+						@pic.new_sub_path
+						gen_arc(vert.x, vert.y, 1000, 0, 5, 900)
+						@pic.set_source_rgba(0, 0, 0, 1) 
+end
+
+
+			vert.incident_nets.each{|n|
+				if n.next
+					@pic.new_sub_path
+					@pic.arc(vert.x, vert.y, 100, 0, 2 * Math::PI)
+					@pic.stroke
+				end
+				last = vert
+				lastx = lasty = nil
+				lr = 0
+				to = n.next
+				#to_net = last.net(n.id)
+				to_net = n.nstep
+				while to do
+				#hhh = 
+					last_net = to_net.pstep
+					#to 
+					last = last_net.vertex
+					#break if to_net.nstep != to.net(n.id)
+
+				  #to_net = to.net(n.id)
+				  #to_net = to.
+					
+					radius = to_net.radius
+					#puts 'rrrrrrr', radius
+					t = get_tangents(last.x, last.y, lr, last_net.rgt, to.x, to.y, radius, to_net.rgt)
+					gen_line(*t, Trace_Width)
+					if lr > 0
+					  start_angle = Math.atan2(lasty - last.y, lastx - last.x)
+						end_angle = Math.atan2(t[1] - last.y, t[0] - last.x)
+						start_angle, end_angle = end_angle, start_angle unless last_net.rgt
+						@pic.set_source_rgba(1, 0, 0, 1) if last_net.rgt #== last_net.ct
+						gen_arc(last.x, last.y, lr, start_angle, end_angle, Trace_Width)
+						@pic.set_source_rgba(0, 0, 0, 1) 
+					end
+					lr = radius
+					last = to
+					to_net = to_net.nstep
+					if to_net
+					to = to_net.vertex
+					else
+to = nil
+					end
+					lastx = t[2]
+					lasty = t[3]
+				end
+			}
+		}
+
+@block_hash.each_key{|el|
+#el.each{|r|
+#
+#		set_color(rand, rand, rand, 0.5)
+#gen_line(el[0].vertex.x, el[0].vertex.y, el[1].vertex.x, el[1].vertex.y, 2)
+#gen_line(el[0].vertex.x, el[0].vertex.y, el[2].vertex.x, el[2].vertex.y, 2)
+
+
+#					@pic.new_sub_path
+
+#					@pic.arc(r.vertex.x, r.vertex.y, 20, 0, Math::PI)
+#					@pic.stroke
+#}
+
+
+}
+
+
+	end
+
+
+  
+	def old_draw_routes
+		set_color(0, 0, 0, 1)
+		@vertices.each{|vert|
+if false#vert.cid == -1
+						@pic.set_source_rgba(1, 0, 0, 1)# if last_net.rgt #== last_net.ct
+						@pic.new_sub_path
+						gen_arc(vert.x, vert.y, 1000, 0, 5, 900)
+						@pic.set_source_rgba(0, 0, 0, 1) 
+end
+
+
+			vert.incident_nets.each{|n|
+				if n.next
+					@pic.new_sub_path
+					@pic.arc(vert.x, vert.y, 100, 0, 2 * Math::PI)
+					@pic.stroke
+				end
+				last = vert
+				lastx = lasty = nil
+				lr = 0
+				to = n.next
+				to_net = last.net(n.id)
+				while to do
+					last_net = to_net
+					break if to_net.nstep != to.net(n.id)
+
+				  to_net = to.net(n.id)
+					
+					radius = to_net.radius
+					#puts 'rrrrrrr', radius
+					t = get_tangents(last.x, last.y, lr, last_net.rgt, to.x, to.y, radius, to_net.rgt)
+					gen_line(*t, Trace_Width)
+					if lr > 0
+					  start_angle = Math.atan2(lasty - last.y, lastx - last.x)
+						end_angle = Math.atan2(t[1] - last.y, t[0] - last.x)
+						start_angle, end_angle = end_angle, start_angle unless last_net.rgt
+						@pic.set_source_rgba(1, 0, 0, 1) if last_net.rgt #== last_net.ct
+						gen_arc(last.x, last.y, lr, start_angle, end_angle, Trace_Width)
+						@pic.set_source_rgba(0, 0, 0, 1) 
+					end
+					lr = radius
+					last = to
+					to = to_net.next
+					lastx = t[2]
+					lasty = t[3]
+				end
+			}
+		}
+
+@block_hash.each_key{|el|
+#el.each{|r|
+#
+#		set_color(rand, rand, rand, 0.5)
+#gen_line(el[0].vertex.x, el[0].vertex.y, el[1].vertex.x, el[1].vertex.y, 2)
+#gen_line(el[0].vertex.x, el[0].vertex.y, el[2].vertex.x, el[2].vertex.y, 2)
+
+
+#					@pic.new_sub_path
+
+#					@pic.arc(r.vertex.x, r.vertex.y, 20, 0, Math::PI)
+#					@pic.stroke
+#}
+
+
+}
+
+
+	end
+
+	def set_line_width(w)
+		@pic.set_line_width(w)
+	end
+	def set_color(r, g, b, a)
+		@pic.set_source_rgba(r, g, b, a)
+	end
+	def save_picture
+		@image.write_to_png(@filename)
+	end
+end
+end
+
+if __FILE__ == $0
+
+
+
+rs = RM::init_seed
+#r = RBR::Router.new(0, 0, Board_Size, Board_Size)
+r = RBR::Router.new(0, 0, PCB_Size, PCB_Size)
+
+r.generate_test_vertices
+r.finish_init(true)
+r.filename = 'pic' + rs.to_s.rjust(3, "0") + '.png'
+r.draw_vertices
+
+col = ([1, 0, 0].permutation(3).to_a + [1, 1, 0].permutation(3).to_a).uniq - [[1, 0, 0]]
+r.set_color(1, 0, 0, 0.7)
+r.set_line_width(1200)
+#(5..9).each{|i|
+###(4..8).each{|i|
+[0,1,4,5,6,7,8].each{|i|
+#next if i == 7
+#(2..2).each{|i|
+r.set_color(*col[i % 5], 0.4)
+r.route(i)
+}
+r.sort_attached_nets
+
+r.prepare_steps
+r.nubly
+r.prepare_steps
+
+r.sort_attached_nets
+#r.nobly
+r.prepare_steps
+
+
+r.nubly
+r.prepare_steps
+
+r.sort_attached_nets
+#r.nobly
+r.prepare_steps
+
+
+
+
+
+
+r.nubly(true)
+r.sort_attached_nets
+#r.nobly
+r.prepare_steps
+
+
+
+
+
+
+
+
+
+#r.nubly
+
+
+#r.sort_attached_nets
+
+#r.prepare_steps
+
+#r.nubly
+
+
+#r.sort_attached_nets
+
+#r.prepare_steps
+
+
+
+#r.nobly
+#r.sort_attached_nets
+
+#r.prepare_steps
+#r.nobly
+
+
+#r.nubly
+
+
+
+r.draw_routes
+r.flag_vertices
+r.save_picture
+puts $glob
+
+
+end
