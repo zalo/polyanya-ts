@@ -521,9 +521,9 @@ export default function PcbRoutingPlayground() {
           <ol style={{ margin: 0, paddingLeft: 16 }}>
             <li>Build CDT with obstacles + trace endpoints as vertices</li>
             <li>A* on CDT edges finds initial vertex-to-vertex path</li>
-            <li>Corridor = triangles adjacent to traversed edges</li>
-            <li>Read crossing order at shared portals from geometry</li>
-            <li>Funnel algorithm optimizes within corridor (rubberband)</li>
+            <li>Initial path establishes topology (which side of each obstacle)</li>
+            <li>String-pull: walk CDT to check line-of-sight between vertices</li>
+            <li>Kept vertices = obstacle corners the trace wraps around</li>
           </ol>
         </div>
       </div>
