@@ -1,20 +1,28 @@
 /**
  * Topological Rubberband Routing
  *
- * Implements a simplified version of the SURF rubberband routing approach:
- * 1. Build a Constrained Delaunay Triangulation (CDT) with obstacles and trace endpoints
- * 2. Find an initial path through the triangulation corridor (using Polyanya)
- * 3. Extract the "corridor" of triangles the path passes through
- * 4. Apply the funnel algorithm to produce the shortest path within that corridor
- *    (the "rubberband" path)
+ * Implements the SURF rubberband routing approach for PCB autorouting:
  *
- * Multi-trace handling:
- * When multiple traces share overlapping corridors, they are routed sequentially.
- * Each trace's funnel portals are narrowed by previously routed traces that pass
- * through the same portal edges, pushing the new trace to one side of the existing
- * ones (like rubber bands being pushed apart). This is the core of the topological
- * routing approach from Dayan's dissertation — traces maintain their relative
- * topological ordering within shared corridors.
+ * Phase 1 — Initial embedding:
+ *   Route all traces independently via Polyanya to establish topological corridors.
+ *   The initial paths define the topology: which triangles each trace crosses,
+ *   and the relative ordering of traces at shared portals.
+ *
+ * Phase 2 — Read crossing order:
+ *   At each portal edge shared by multiple traces, determine the crossing order
+ *   from the initial paths (left-to-right parameter along the portal edge).
+ *   This crossing order IS the topology — it's order-independent and emerges
+ *   from the geometry of the initial embedding.
+ *
+ * Phase 3 — Simultaneous rubberband:
+ *   Subdivide each shared portal into sub-channels based on the crossing order,
+ *   then funnel-optimize each trace within its assigned sub-portals. All traces
+ *   are optimized simultaneously — no trace has priority over another.
+ *
+ * The result: traces naturally push apart at shared portals like physical rubber
+ * bands, with spacing proportional to the number of traces sharing each portal.
+ * The topological ordering at each portal is determined by geometry, not by
+ * routing order.
  *
  * Reference: Tal Dayan, "Rubber-Band Based Topological Router", PhD Dissertation, UCSC, 1997
  */
@@ -42,109 +50,153 @@ export interface TraceRoute {
   rubberbandPath: Point[]
 }
 
-/** Spacing between traces sharing a corridor (in world units) */
+/** Minimum spacing between traces at shared portals (world units) */
 const TRACE_SPACING = 1.5
 
 /**
  * Route traces through a navigation mesh using topological rubberband routing.
  *
- * Traces are routed sequentially. When multiple traces share the same corridor
- * portals, the funnel algorithm narrows the portals to account for previously
- * placed traces, maintaining topological ordering and spacing.
+ * All traces are embedded simultaneously — routing order does not matter.
+ * The topological ordering at shared portals emerges from the initial
+ * Polyanya paths, and the rubberband optimization respects that ordering.
  */
 export function routeTraces(mesh: Mesh, traces: Trace[]): TraceRoute[] {
-  const results: TraceRoute[] = []
+  if (traces.length === 0) return []
 
-  // Track which portal edges have been used by previously routed traces,
-  // and from which side. Portal key -> list of crossing points on that portal.
-  const portalOccupancy = new Map<string, PortalCrossing[]>()
+  // Phase 1: Find initial paths and corridors for ALL traces independently
+  const initialResults: {
+    trace: Trace
+    initialPath: Point[]
+    corridor: number[]
+  }[] = []
 
   for (const trace of traces) {
-    const route = routeSingleTrace(mesh, trace, portalOccupancy)
-    results.push(route)
+    const search = new SearchInstance(mesh)
+    search.setStartGoal(trace.start, trace.end)
+    search.search()
+    const initialPath = search.getPathPoints()
+    const corridor =
+      initialPath.length >= 2 ? extractCorridor(mesh, initialPath) : []
+    initialResults.push({ trace, initialPath, corridor })
+  }
 
-    // Record this trace's crossings on shared portals
-    if (route.corridor.length > 1) {
-      recordPortalCrossings(mesh, route, portalOccupancy)
+  // Phase 2: Build portal crossing order from initial paths
+  // For each portal edge, determine which traces cross it and in what order
+  const portalCrossings = buildPortalCrossingOrder(mesh, initialResults)
+
+  // Phase 3: Rubberband-optimize each trace with topology-aware sub-portals
+  const results: TraceRoute[] = []
+
+  for (let i = 0; i < initialResults.length; i++) {
+    const { trace, initialPath, corridor } = initialResults[i]!
+
+    if (corridor.length <= 1 || initialPath.length < 2) {
+      results.push({ trace, initialPath, corridor, rubberbandPath: initialPath })
+      continue
     }
+
+    const rubberbandPath = funnelWithTopology(
+      mesh,
+      corridor,
+      trace.start,
+      trace.end,
+      trace.id,
+      portalCrossings,
+    )
+
+    results.push({ trace, initialPath, corridor, rubberbandPath })
   }
 
   return results
 }
 
-interface PortalCrossing {
-  /** Parameter t along the portal edge [0,1] where the trace crosses */
+// ---------------------------------------------------------------------------
+// Phase 2: Portal crossing order
+// ---------------------------------------------------------------------------
+
+/** A trace's crossing of a portal edge */
+interface TraceCrossing {
+  traceId: number
+  /** Parameter t in [0,1] along the portal edge (left=0, right=1) */
   t: number
-  /** Which side of the portal the trace enters from (sign of cross product) */
-  side: number
 }
 
-/** Canonical key for a portal edge between two vertex indices */
-function portalKey(mesh: Mesh, polyIdxA: number, polyIdxB: number): string {
-  const polyA = mesh.polygons[polyIdxA]!
-  const polyB = mesh.polygons[polyIdxB]!
-  const shared = findSharedVertexPair(polyA, polyB)
-  if (!shared) return ""
-  const [a, b] = shared[0] < shared[1] ? shared : [shared[1], shared[0]]
-  return `${a},${b}`
+/** Crossing data for one portal, keyed by canonical vertex pair */
+interface PortalCrossingData {
+  /** Vertex indices of the portal edge, ordered canonically (smaller first) */
+  v0: number
+  v1: number
+  /** Traces crossing this portal, sorted by t (left-to-right order) */
+  crossings: TraceCrossing[]
 }
 
-function findSharedVertexPair(
-  polyA: { vertices: number[] },
-  polyB: { vertices: number[] },
-): [number, number] | null {
-  const vSetB = new Set(polyB.vertices)
-  for (let i = 0; i < polyA.vertices.length; i++) {
-    const va = polyA.vertices[i]!
-    const vb = polyA.vertices[(i + 1) % polyA.vertices.length]!
-    if (vSetB.has(va) && vSetB.has(vb)) {
-      return [va, vb]
-    }
-  }
-  return null
+/** Map from canonical portal key "v0,v1" to crossing data */
+type PortalCrossingMap = Map<string, PortalCrossingData>
+
+function canonicalPortalKey(a: number, b: number): string {
+  return a < b ? `${a},${b}` : `${b},${a}`
 }
 
-function recordPortalCrossings(
+/**
+ * For each portal edge shared by multiple traces, determine the crossing
+ * order from the initial Polyanya paths.
+ *
+ * The crossing order is geometry-derived and independent of routing order.
+ */
+function buildPortalCrossingOrder(
   mesh: Mesh,
-  route: TraceRoute,
-  occupancy: Map<string, PortalCrossing[]>,
-) {
-  const corridor = route.corridor
-  const rbPath = route.rubberbandPath
+  initialResults: { trace: Trace; initialPath: Point[]; corridor: number[] }[],
+): PortalCrossingMap {
+  const map: PortalCrossingMap = new Map()
 
-  for (let i = 0; i < corridor.length - 1; i++) {
-    const key = portalKey(mesh, corridor[i]!, corridor[i + 1]!)
-    if (!key) continue
+  for (const { trace, initialPath, corridor } of initialResults) {
+    if (corridor.length < 2 || initialPath.length < 2) continue
 
-    const polyA = mesh.polygons[corridor[i]!]!
-    const polyB = mesh.polygons[corridor[i + 1]!]!
-    const shared = findSharedVertexPair(polyA, polyB)
-    if (!shared) continue
+    for (let ci = 0; ci < corridor.length - 1; ci++) {
+      const polyA = mesh.polygons[corridor[ci]!]!
+      const polyB = mesh.polygons[corridor[ci + 1]!]!
+      const shared = findSharedVertexPair(polyA, polyB)
+      if (!shared) continue
 
-    const pLeft = mesh.vertices[shared[0]!]!.p
-    const pRight = mesh.vertices[shared[1]!]!.p
+      const [sv0, sv1] = shared
+      const key = canonicalPortalKey(sv0, sv1)
+      const pLeft = mesh.vertices[sv0]!.p
+      const pRight = mesh.vertices[sv1]!.p
 
-    // Find where the rubberband path crosses this portal
-    const crossing = findPathPortalCrossing(rbPath, pLeft, pRight)
-    if (crossing !== null) {
-      let list = occupancy.get(key)
-      if (!list) {
-        list = []
-        occupancy.set(key, list)
+      // Find where this trace's initial path crosses this portal
+      const t = findPathCrossingT(initialPath, pLeft, pRight)
+      if (t === null) continue
+
+      let data = map.get(key)
+      if (!data) {
+        data = { v0: Math.min(sv0, sv1), v1: Math.max(sv0, sv1), crossings: [] }
+        map.set(key, data)
       }
-      list.push(crossing)
-      // Sort crossings by t so we can compute spacing correctly
-      list.sort((a, b) => a.t - b.t)
+
+      // Only add if this trace hasn't already been recorded on this portal
+      if (!data.crossings.some((c) => c.traceId === trace.id)) {
+        data.crossings.push({ traceId: trace.id, t })
+      }
     }
   }
+
+  // Sort crossings at each portal by t (left-to-right)
+  for (const data of map.values()) {
+    data.crossings.sort((a, b) => a.t - b.t)
+  }
+
+  return map
 }
 
-/** Find where a path crosses a portal edge, returning the t parameter */
-function findPathPortalCrossing(
+/**
+ * Find the parameter t in [0,1] where a path crosses a portal edge.
+ * t=0 is the left vertex, t=1 is the right vertex.
+ */
+function findPathCrossingT(
   path: Point[],
   portalLeft: Point,
   portalRight: Point,
-): PortalCrossing | null {
+): number | null {
   const edgeDx = portalRight.x - portalLeft.x
   const edgeDy = portalRight.y - portalLeft.y
   const edgeLenSq = edgeDx * edgeDx + edgeDy * edgeDy
@@ -154,62 +206,166 @@ function findPathPortalCrossing(
     const a = path[i]!
     const b = path[i + 1]!
 
-    // Line-line intersection
     const dx = b.x - a.x
     const dy = b.y - a.y
     const denom = dx * edgeDy - dy * edgeDx
     if (Math.abs(denom) < 1e-10) continue
 
+    // t1 = parameter along path segment, t2 = parameter along portal edge
     const t1 =
       ((portalLeft.x - a.x) * edgeDy - (portalLeft.y - a.y) * edgeDx) / denom
     const t2 =
       ((portalLeft.x - a.x) * dy - (portalLeft.y - a.y) * dx) / denom
 
     if (t1 >= -0.01 && t1 <= 1.01 && t2 >= -0.01 && t2 <= 1.01) {
-      const side = triArea2(portalLeft, portalRight, a)
-      return { t: Math.max(0, Math.min(1, t2)), side }
+      return Math.max(0, Math.min(1, t2))
     }
   }
 
-  return null
+  // Fallback: project the midpoint of the path's crossing segment onto the portal
+  // This handles cases where the path doesn't cleanly intersect
+  const midIdx = Math.floor(path.length / 2)
+  const mid = path[midIdx]!
+  const t =
+    ((mid.x - portalLeft.x) * edgeDx + (mid.y - portalLeft.y) * edgeDy) /
+    edgeLenSq
+  return Math.max(0, Math.min(1, t))
 }
 
-function routeSingleTrace(
-  mesh: Mesh,
-  trace: Trace,
-  portalOccupancy: Map<string, PortalCrossing[]>,
-): TraceRoute {
-  // 1. Find initial path using Polyanya
-  const search = new SearchInstance(mesh)
-  search.setStartGoal(trace.start, trace.end)
-  search.search()
-  const initialPath = search.getPathPoints()
+// ---------------------------------------------------------------------------
+// Phase 3: Topology-aware funnel optimization
+// ---------------------------------------------------------------------------
 
-  if (initialPath.length < 2) {
+interface Portal {
+  left: Point
+  right: Point
+}
+
+/**
+ * Funnel-optimize a trace through its corridor, using sub-portals that
+ * account for the topological crossing order of all traces.
+ *
+ * At each shared portal, this trace gets a sub-channel within the full
+ * portal edge. The sub-channel position is determined by the trace's
+ * crossing order relative to other traces — NOT by routing order.
+ */
+function funnelWithTopology(
+  mesh: Mesh,
+  corridor: number[],
+  start: Point,
+  end: Point,
+  traceId: number,
+  portalCrossings: PortalCrossingMap,
+): Point[] {
+  if (corridor.length <= 1) return [start, end]
+
+  const portals: Portal[] = []
+  portals.push({ left: start, right: start })
+
+  for (let ci = 0; ci < corridor.length - 1; ci++) {
+    const polyA = mesh.polygons[corridor[ci]!]!
+    const polyB = mesh.polygons[corridor[ci + 1]!]!
+    const shared = findSharedEdge(mesh, polyA, polyB)
+    if (!shared) continue
+
+    const sharedVerts = findSharedVertexPair(polyA, polyB)
+    if (!sharedVerts) {
+      portals.push(shared)
+      continue
+    }
+
+    const key = canonicalPortalKey(sharedVerts[0], sharedVerts[1])
+    const crossingData = portalCrossings.get(key)
+
+    if (!crossingData || crossingData.crossings.length <= 1) {
+      // No other traces share this portal — use full width
+      portals.push(shared)
+      continue
+    }
+
+    // Multiple traces share this portal: compute this trace's sub-channel
+    const subPortal = computeSubPortal(shared, crossingData, traceId)
+    portals.push(subPortal)
+  }
+
+  portals.push({ left: end, right: end })
+
+  if (portals.length < 2) return [start, end]
+  return runFunnel(portals)
+}
+
+/**
+ * Compute the sub-portal for a specific trace within a shared portal.
+ *
+ * The portal edge is divided into N+1 equal channels (where N = number
+ * of traces), with guard bands at the edges. Each trace gets the channel
+ * at its position in the crossing order.
+ *
+ * This ensures traces are evenly spaced and don't overlap, regardless
+ * of the order they were processed.
+ */
+function computeSubPortal(
+  fullPortal: Portal,
+  crossingData: PortalCrossingData,
+  traceId: number,
+): Portal {
+  const { crossings } = crossingData
+  const n = crossings.length
+  const idx = crossings.findIndex((c) => c.traceId === traceId)
+  if (idx < 0) return fullPortal // trace not found — use full portal
+
+  const dx = fullPortal.right.x - fullPortal.left.x
+  const dy = fullPortal.right.y - fullPortal.left.y
+  const len = Math.sqrt(dx * dx + dy * dy)
+
+  // Total spacing needed: (n-1) gaps of TRACE_SPACING between trace centers
+  const totalSpacing = (n - 1) * TRACE_SPACING
+  const margin = TRACE_SPACING * 0.5 // guard band at edges
+
+  if (totalSpacing + 2 * margin >= len) {
+    // Portal is too narrow to fit all traces with full spacing.
+    // Fall back to even subdivision of the portal.
+    const slotWidth = len / (n + 1)
+    const center = (idx + 1) * slotWidth / len // normalized [0,1]
+    const halfSlot = slotWidth * 0.4 / len
+
     return {
-      trace,
-      initialPath,
-      corridor: [],
-      rubberbandPath: initialPath,
+      left: {
+        x: fullPortal.left.x + dx * Math.max(0, center - halfSlot),
+        y: fullPortal.left.y + dy * Math.max(0, center - halfSlot),
+      },
+      right: {
+        x: fullPortal.left.x + dx * Math.min(1, center + halfSlot),
+        y: fullPortal.left.y + dy * Math.min(1, center + halfSlot),
+      },
     }
   }
 
-  // 2. Extract the corridor of polygons the path passes through
-  const corridor = extractCorridor(mesh, initialPath)
+  // Portal has enough room: place trace centers evenly with TRACE_SPACING gaps,
+  // centered within the portal
+  const bandStart = (len - totalSpacing) / 2 // distance from left to first center
+  const centerDist = bandStart + idx * TRACE_SPACING
+  const centerT = centerDist / len
 
-  // 3. Apply funnel algorithm with portal narrowing for shared corridors
-  const rubberbandPath =
-    corridor.length > 0
-      ? funnelPath(mesh, corridor, trace.start, trace.end, portalOccupancy)
-      : initialPath
+  // Each trace's sub-portal extends half a TRACE_SPACING in each direction
+  // (but clamped so traces don't extend past the portal edges)
+  const halfWidth = Math.min(TRACE_SPACING * 0.4, bandStart * 0.8) / len
 
   return {
-    trace,
-    initialPath,
-    corridor,
-    rubberbandPath,
+    left: {
+      x: fullPortal.left.x + dx * Math.max(0, centerT - halfWidth),
+      y: fullPortal.left.y + dy * Math.max(0, centerT - halfWidth),
+    },
+    right: {
+      x: fullPortal.left.x + dx * Math.min(1, centerT + halfWidth),
+      y: fullPortal.left.y + dy * Math.min(1, centerT + halfWidth),
+    },
   }
 }
+
+// ---------------------------------------------------------------------------
+// Corridor extraction
+// ---------------------------------------------------------------------------
 
 /**
  * Extract the sequence of polygon indices that a path passes through.
@@ -235,7 +391,10 @@ function extractCorridor(mesh: Mesh, path: Point[]): number[] {
       }
       const loc = mesh.getPointLocation(mid)
       if (loc.poly1 >= 0) {
-        if (corridor.length === 0 || corridor[corridor.length - 1] !== loc.poly1) {
+        if (
+          corridor.length === 0 ||
+          corridor[corridor.length - 1] !== loc.poly1
+        ) {
           corridor.push(loc.poly1)
         }
       }
@@ -243,7 +402,10 @@ function extractCorridor(mesh: Mesh, path: Point[]): number[] {
 
     const endLoc = mesh.getPointLocation(b)
     if (endLoc.poly1 >= 0) {
-      if (corridor.length === 0 || corridor[corridor.length - 1] !== endLoc.poly1) {
+      if (
+        corridor.length === 0 ||
+        corridor[corridor.length - 1] !== endLoc.poly1
+      ) {
         corridor.push(endLoc.poly1)
       }
     }
@@ -252,133 +414,23 @@ function extractCorridor(mesh: Mesh, path: Point[]): number[] {
   return corridor
 }
 
-/**
- * Funnel algorithm with multi-trace awareness.
- *
- * Portal edges are narrowed when other traces have already been routed through them.
- * This pushes the new trace to the side of existing traces, maintaining topological
- * ordering — the hallmark of rubberband routing.
- */
-function funnelPath(
-  mesh: Mesh,
-  corridor: number[],
-  start: Point,
-  end: Point,
-  portalOccupancy: Map<string, PortalCrossing[]>,
-): Point[] {
-  if (corridor.length <= 1) {
-    return [start, end]
-  }
+// ---------------------------------------------------------------------------
+// Shared edge / vertex helpers
+// ---------------------------------------------------------------------------
 
-  const portals = buildPortals(mesh, corridor, start, end, portalOccupancy)
-
-  if (portals.length < 2) {
-    return [start, end]
-  }
-
-  return runFunnel(portals)
-}
-
-interface Portal {
-  left: Point
-  right: Point
-}
-
-/**
- * Build portal edges between consecutive corridor polygons.
- * When a portal has existing trace crossings, the portal edge is narrowed
- * to push the new trace to the side with more available space.
- */
-function buildPortals(
-  mesh: Mesh,
-  corridor: number[],
-  start: Point,
-  end: Point,
-  portalOccupancy: Map<string, PortalCrossing[]>,
-): Portal[] {
-  const portals: Portal[] = []
-
-  portals.push({ left: start, right: start })
-
-  for (let i = 0; i < corridor.length - 1; i++) {
-    const polyA = mesh.polygons[corridor[i]!]!
-    const polyB = mesh.polygons[corridor[i + 1]!]!
-
-    const shared = findSharedEdge(mesh, polyA, polyB)
-    if (!shared) continue
-
-    // Check if this portal has existing trace crossings
-    const key = portalKey(mesh, corridor[i]!, corridor[i + 1]!)
-    const crossings = key ? portalOccupancy.get(key) : undefined
-
-    if (crossings && crossings.length > 0) {
-      // Narrow the portal: push each side inward based on trace crossings
-      const narrowed = narrowPortal(shared, crossings, start)
-      portals.push(narrowed)
-    } else {
-      portals.push(shared)
+function findSharedVertexPair(
+  polyA: { vertices: number[] },
+  polyB: { vertices: number[] },
+): [number, number] | null {
+  const vSetB = new Set(polyB.vertices)
+  for (let i = 0; i < polyA.vertices.length; i++) {
+    const va = polyA.vertices[i]!
+    const vb = polyA.vertices[(i + 1) % polyA.vertices.length]!
+    if (vSetB.has(va) && vSetB.has(vb)) {
+      return [va, vb]
     }
   }
-
-  portals.push({ left: end, right: end })
-
-  return portals
-}
-
-/**
- * Narrow a portal edge to account for existing trace crossings.
- *
- * If traces have already crossed this portal, we offset the portal edge
- * to push the new trace to the side with more available space.
- * The offset is proportional to TRACE_SPACING per existing crossing.
- */
-function narrowPortal(
-  portal: Portal,
-  crossings: PortalCrossing[],
-  approachFrom: Point,
-): Portal {
-  const dx = portal.right.x - portal.left.x
-  const dy = portal.right.y - portal.left.y
-  const len = Math.sqrt(dx * dx + dy * dy)
-  if (len < 1e-8) return portal
-
-  // Determine which side of the portal the new trace is approaching from
-  const approachSide = triArea2(portal.left, portal.right, approachFrom)
-
-  // Calculate total offset needed (one TRACE_SPACING per existing crossing)
-  const numCrossings = crossings.length
-  const offsetPerCrossing = TRACE_SPACING / len // Normalized offset
-
-  // Find the range of t values occupied by existing crossings
-  const minT = Math.max(0, crossings[0]!.t - offsetPerCrossing)
-  const maxT = Math.min(1, crossings[numCrossings - 1]!.t + offsetPerCrossing)
-
-  // Determine which side has more room and push the new trace there
-  const leftRoom = minT
-  const rightRoom = 1 - maxT
-
-  let newLeft: Point
-  let newRight: Point
-
-  if (approachSide >= 0) {
-    // Approaching from the left side — push portal left edge inward
-    const inset = Math.min(offsetPerCrossing * numCrossings, 0.4)
-    newLeft = {
-      x: portal.left.x + dx * inset,
-      y: portal.left.y + dy * inset,
-    }
-    newRight = portal.right
-  } else {
-    // Approaching from the right side — push portal right edge inward
-    const inset = Math.min(offsetPerCrossing * numCrossings, 0.4)
-    newLeft = portal.left
-    newRight = {
-      x: portal.right.x - dx * inset,
-      y: portal.right.y - dy * inset,
-    }
-  }
-
-  return { left: newLeft, right: newRight }
+  return null
 }
 
 function findSharedEdge(
@@ -387,11 +439,9 @@ function findSharedEdge(
   polyB: { vertices: number[]; polygons: number[] },
 ): Portal | null {
   const vSetB = new Set(polyB.vertices)
-
   for (let i = 0; i < polyA.vertices.length; i++) {
     const va = polyA.vertices[i]!
     const vb = polyA.vertices[(i + 1) % polyA.vertices.length]!
-
     if (vSetB.has(va) && vSetB.has(vb)) {
       return {
         left: mesh.vertices[va]!.p,
@@ -399,9 +449,12 @@ function findSharedEdge(
       }
     }
   }
-
   return null
 }
+
+// ---------------------------------------------------------------------------
+// Funnel algorithm
+// ---------------------------------------------------------------------------
 
 /**
  * Simple Stupid Funnel Algorithm.
@@ -426,7 +479,10 @@ function runFunnel(portals: Portal[]): Point[] {
 
     // Update right vertex
     if (triArea2(apex, portalRight, right) <= 0) {
-      if (ptsEqual(apex, portalRight) || triArea2(apex, portalLeft, right) > 0) {
+      if (
+        ptsEqual(apex, portalRight) ||
+        triArea2(apex, portalLeft, right) > 0
+      ) {
         portalRight = right
         rightIndex = i
       } else {
@@ -444,7 +500,10 @@ function runFunnel(portals: Portal[]): Point[] {
 
     // Update left vertex
     if (triArea2(apex, portalLeft, left) >= 0) {
-      if (ptsEqual(apex, portalLeft) || triArea2(apex, portalRight, left) < 0) {
+      if (
+        ptsEqual(apex, portalLeft) ||
+        triArea2(apex, portalRight, left) < 0
+      ) {
         portalLeft = left
         leftIndex = i
       } else {
@@ -468,6 +527,10 @@ function runFunnel(portals: Portal[]): Point[] {
 
   return path
 }
+
+// ---------------------------------------------------------------------------
+// Geometry helpers
+// ---------------------------------------------------------------------------
 
 /** Twice the signed area of triangle (a, b, c). Positive = CCW. */
 function triArea2(a: Point, b: Point, c: Point): number {
