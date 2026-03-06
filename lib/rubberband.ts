@@ -563,6 +563,7 @@ function buildFinalPath(
   path: Region[],
   traceWidth: number,
   traceClearance: number,
+  obstacleEdges: Segment[] = [],
 ): { points: Point[]; arcs: { centre: Point; radius: number }[] } {
   if (path.length < 2) return { points: path.map(r => r.vertex), arcs: [] }
 
@@ -588,27 +589,49 @@ function buildFinalPath(
     const a = path[i]!, b = path[i + 1]!
     const ra = radii[i]!, rb = radii[i + 1]!
 
-    // Determine tangent side: the trace must go around the EXTERIOR
-    // of obstacle corners. The tangent side is the opposite of the
-    // turn direction — if the path turns left at a vertex, the tangent
-    // touches the RIGHT side of the circle (exterior).
-    let leftA = false
-    if (i > 0) {
-      const prev = path[i - 1]!
-      leftA = windSign(prev.rx, prev.ry, b.rx, b.ry, a.rx, a.ry) <= 0
-    }
-    let leftB = false
-    if (i + 2 < path.length) {
-      const next = path[i + 2]!
-      leftB = windSign(a.rx, a.ry, next.rx, next.ry, b.rx, b.ry) <= 0
-    }
-
     if (ra < 1e-6 && rb < 1e-6) {
-      // No clearance circles — straight line
-      tangents.push({ x1: a.rx, y1: a.ry, x2: b.rx, y2: b.ry, leftA, leftB })
+      tangents.push({ x1: a.rx, y1: a.ry, x2: b.rx, y2: b.ry, leftA: false, leftB: false })
     } else {
-      const [tx1, ty1, tx2, ty2] = getTangents(a.rx, a.ry, ra, leftA, b.rx, b.ry, rb, leftB)
-      tangents.push({ x1: tx1, y1: ty1, x2: tx2, y2: ty2, leftA, leftB })
+      // Try all 4 tangent side combinations and pick the one that
+      // doesn't cross any obstacle edge. This is the only reliable
+      // way to determine which side is "exterior".
+      let bestTangent: [number, number, number, number] | null = null
+      let bestLA = false, bestLB = false
+
+      for (const la of [false, true]) {
+        for (const lb of [false, true]) {
+          const t = getTangents(a.rx, a.ry, ra, la, b.rx, b.ry, rb, lb)
+          // Check if this tangent line crosses any obstacle edge
+          let crosses = false
+          for (const edge of obstacleEdges) {
+            if (segmentsProperlyIntersect(
+              { x: t[0], y: t[1] }, { x: t[2], y: t[3] },
+              edge.a, edge.b,
+            )) {
+              crosses = true
+              break
+            }
+          }
+          if (!crosses) {
+            bestTangent = t
+            bestLA = la
+            bestLB = lb
+            break
+          }
+        }
+        if (bestTangent) break
+      }
+
+      if (!bestTangent) {
+        // All tangents cross an obstacle — fall back to straight line
+        bestTangent = getTangents(a.rx, a.ry, ra, false, b.rx, b.ry, rb, false)
+      }
+
+      tangents.push({
+        x1: bestTangent[0], y1: bestTangent[1],
+        x2: bestTangent[2], y2: bestTangent[3],
+        leftA: bestLA, leftB: bestLB,
+      })
     }
   }
 
@@ -639,20 +662,9 @@ function buildFinalPath(
       const endAngle = Math.atan2(nextSeg.y1 - centre.y, nextSeg.x1 - centre.x)
 
       let diff = endAngle - startAngle
-      // Normalize to [-π, π]
+      // Normalize to [-π, π] — this gives the SHORT arc
       while (diff > Math.PI) diff -= 2 * Math.PI
       while (diff < -Math.PI) diff += 2 * Math.PI
-
-      // The arc should go the SHORT way around the circle.
-      // turnSign tells us which direction (CW/CCW) is the short way.
-      const prev = path[i]!, cur = path[i + 1]!, next = path[i + 2]!
-      const turnSign = windSign(prev.rx, prev.ry, next.rx, next.ry, cur.rx, cur.ry)
-      if (turnSign > 0 && diff > 0) diff -= 2 * Math.PI  // CCW turn → arc goes CW (negative diff)
-      if (turnSign < 0 && diff < 0) diff += 2 * Math.PI  // CW turn → arc goes CCW (positive diff)
-      if (turnSign === 0) diff = 0
-
-      // Clamp to prevent full loops
-      if (Math.abs(diff) > Math.PI * 1.8) diff = Math.sign(diff) * Math.PI * 1.8
 
       const nSamples = Math.max(4, Math.ceil(Math.abs(diff) * ri * 0.5))
       for (let s = 1; s < nSamples; s++) {
@@ -750,7 +762,7 @@ export function routeTraces(mesh: Mesh, traces: Trace[], clearance = 0): TraceRo
     }
 
     // Build final geometry with tangent arcs at obstacle corners
-    const { points: rubberbandPath, arcs } = buildFinalPath(mesh, pulledRegions, traceWidth, traceClearance)
+    const { points: rubberbandPath, arcs } = buildFinalPath(mesh, pulledRegions, traceWidth, traceClearance, obstacleEdges)
 
     // Split regions along path for future traces
     splitRegionsAlongPath(regionPath, regions, regionByVertex, cuts, traceWidth, traceClearance)
