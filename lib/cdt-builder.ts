@@ -145,46 +145,52 @@ export function cdtTriangulate(input: {
   // --- Run CDT (with retry on degenerate input) ---
   // cdt2d can crash on near-degenerate geometry (near-collinear constraint edges,
   // very close points). Retry with progressively more jitter if it fails.
-  let triangles: [number, number, number][]
+  // --- Run CDT twice: once for ALL triangles, once for free-space only ---
+  // cdt2d does exact parity-based interior/exterior classification.
+  // By comparing the two results, we get perfect obstacle-interior
+  // identification without centroid-based approximation.
+  const rPts = resolved.pts
+
+  let allTriangles: [number, number, number][]
+  let freeTriangles: [number, number, number][]
   try {
-    triangles = cdt2d(resolved.pts, resolved.constraintEdges, { interior: true, exterior: true })
+    allTriangles = cdt2d(rPts, resolved.constraintEdges, { interior: true, exterior: true })
+    freeTriangles = cdt2d(rPts, resolved.constraintEdges, { interior: true, exterior: false })
   } catch {
-    // Retry with stronger random jitter on all non-bounds points
-    const jitteredPts = resolved.pts.map((p, i) => {
-      if (i < boundsEnd) return p // keep bounds precise
+    const jitteredPts = rPts.map((p, i) => {
+      if (i < boundsEnd) return p
       return [
         p[0] + (Math.random() - 0.5) * 1e-5,
         p[1] + (Math.random() - 0.5) * 1e-5,
       ] as [number, number]
     })
     try {
-      triangles = cdt2d(jitteredPts, resolved.constraintEdges, { interior: true, exterior: true })
-      // Update resolved.pts so downstream uses the jittered version
+      allTriangles = cdt2d(jitteredPts, resolved.constraintEdges, { interior: true, exterior: true })
+      freeTriangles = cdt2d(jitteredPts, resolved.constraintEdges, { interior: true, exterior: false })
       for (let i = 0; i < jitteredPts.length; i++) {
         resolved.pts[i] = jitteredPts[i]!
       }
     } catch {
-      // CDT is fundamentally broken for this input — return empty result
       return { regions: [], regionWeights: [], regionObstacleIndices: [] }
     }
   }
 
-  // --- Classify triangles ---
-  // CDT runs with interior:true, exterior:true so we get ALL triangles
-  // including obstacle-interior and exterior. Classify each by centroid:
-  //   outside bounds → discard (exterior)
-  //   inside obstacle i → tag obstacleIndex=i (blocked by default)
-  //   free space → tag obstacleIndex=-1
-  const rPts = resolved.pts
-  const EPS_BOUNDS = 1e-4
+  // Build a set of free-space triangle keys for fast lookup
+  const freeSet = new Set<string>()
+  for (const [a, b, c] of freeTriangles) {
+    // Sort vertex indices so the key is order-independent
+    const sorted = [a, b, c].sort((x, y) => x - y)
+    freeSet.add(`${sorted[0]},${sorted[1]},${sorted[2]}`)
+  }
 
-  // --- Convert to Point[][] regions with weight assignment ---
+  // --- Convert to Point[][] regions ---
   const regions: Point[][] = []
   const regionWeights: { weight: number; penalty: number }[] = []
   const regionObstacleIndices: number[] = []
+  const EPS_BOUNDS = 1e-4
 
-  for (let ti = 0; ti < triangles.length; ti++) {
-    const [a, b, c] = triangles[ti]!
+  for (let ti = 0; ti < allTriangles.length; ti++) {
+    const [a, b, c] = allTriangles[ti]!
     const pa = { x: rPts[a]![0], y: rPts[a]![1] }
     const pb = { x: rPts[b]![0], y: rPts[b]![1] }
     const pc = { x: rPts[c]![0], y: rPts[c]![1] }
@@ -199,16 +205,26 @@ export function cdtTriangulate(input: {
     const cross = (pb.x - pa.x) * (pc.y - pa.y) - (pb.y - pa.y) * (pc.x - pa.x)
     regions.push(cross >= 0 ? [pa, pb, pc] : [pa, pc, pb])
 
-    // Classify: inside an obstacle or free space?
-    // Sample the centroid plus additional points inset toward the centroid
-    // to catch thin triangles that straddle obstacle boundaries.
-    // Points are inset by 20% toward the centroid to avoid landing exactly
-    // on CDT constraint edges (which are obstacle polygon boundaries).
+    // Classification using dual-CDT + centroid fallback:
+    // 1. If triangle is NOT in freeSet → definitely obstacle interior
+    // 2. If triangle IS in freeSet but centroid is inside an obstacle →
+    //    obstacle interior (handles nested obstacles where cdt2d's parity
+    //    flips back to "interior" inside the inner ring)
+    // 3. Otherwise → free space
+    const sorted = [a, b, c].sort((x, y) => x - y)
+    const key = `${sorted[0]},${sorted[1]},${sorted[2]}`
+    const cdtSaysFree = freeSet.has(key)
+
+    // Always check centroid against obstacles (catches nested obstacles)
     let obstIdx = getObstacleIndex(cx, cy, resolvedObstacles)
-    if (obstIdx === -1) {
-      const INSET = 0.2 // 20% toward centroid
-      const samplePoints = [
-        // Edge midpoints, inset toward centroid
+
+    if (cdtSaysFree && obstIdx === -1) {
+      // Truly free space — both cdt2d parity and centroid agree
+      obstIdx = -1
+    } else if (obstIdx === -1 && !cdtSaysFree) {
+      // cdt2d says obstacle but centroid doesn't match any — check more points
+      const INSET = 0.3
+      const samples = [
         { x: (pa.x + pb.x) / 2 * (1 - INSET) + cx * INSET,
           y: (pa.y + pb.y) / 2 * (1 - INSET) + cy * INSET },
         { x: (pb.x + pc.x) / 2 * (1 - INSET) + cx * INSET,
@@ -216,11 +232,14 @@ export function cdtTriangulate(input: {
         { x: (pc.x + pa.x) / 2 * (1 - INSET) + cx * INSET,
           y: (pc.y + pa.y) / 2 * (1 - INSET) + cy * INSET },
       ]
-      for (const sp of samplePoints) {
+      for (const sp of samples) {
         obstIdx = getObstacleIndex(sp.x, sp.y, resolvedObstacles)
         if (obstIdx >= 0) break
       }
+      // Last resort: cdt2d says not-free, so it's blocked with index 0
+      if (obstIdx === -1) obstIdx = 0
     }
+    // If cdtSaysFree but centroid IS inside an obstacle → obstIdx stays >= 0
     regionObstacleIndices.push(obstIdx)
 
     // Determine weight from weighted regions (free-space only)

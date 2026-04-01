@@ -2047,11 +2047,14 @@ function cdtTriangulate(input) {
     }
   }
   const resolved = resolveConstraintCrossings(pts, edges, ringBoundaries);
-  let triangles;
+  const rPts = resolved.pts;
+  let allTriangles;
+  let freeTriangles;
   try {
-    triangles = cdt2d(resolved.pts, resolved.constraintEdges, { interior: true, exterior: true });
+    allTriangles = cdt2d(rPts, resolved.constraintEdges, { interior: true, exterior: true });
+    freeTriangles = cdt2d(rPts, resolved.constraintEdges, { interior: true, exterior: false });
   } catch {
-    const jitteredPts = resolved.pts.map((p, i) => {
+    const jitteredPts = rPts.map((p, i) => {
       if (i < boundsEnd) return p;
       return [
         p[0] + (Math.random() - 0.5) * 1e-5,
@@ -2059,7 +2062,8 @@ function cdtTriangulate(input) {
       ];
     });
     try {
-      triangles = cdt2d(jitteredPts, resolved.constraintEdges, { interior: true, exterior: true });
+      allTriangles = cdt2d(jitteredPts, resolved.constraintEdges, { interior: true, exterior: true });
+      freeTriangles = cdt2d(jitteredPts, resolved.constraintEdges, { interior: true, exterior: false });
       for (let i = 0; i < jitteredPts.length; i++) {
         resolved.pts[i] = jitteredPts[i];
       }
@@ -2067,13 +2071,17 @@ function cdtTriangulate(input) {
       return { regions: [], regionWeights: [], regionObstacleIndices: [] };
     }
   }
-  const rPts = resolved.pts;
-  const EPS_BOUNDS = 1e-4;
+  const freeSet = /* @__PURE__ */ new Set();
+  for (const [a, b, c] of freeTriangles) {
+    const sorted = [a, b, c].sort((x, y) => x - y);
+    freeSet.add(`${sorted[0]},${sorted[1]},${sorted[2]}`);
+  }
   const regions = [];
   const regionWeights = [];
   const regionObstacleIndices = [];
-  for (let ti = 0; ti < triangles.length; ti++) {
-    const [a, b, c] = triangles[ti];
+  const EPS_BOUNDS = 1e-4;
+  for (let ti = 0; ti < allTriangles.length; ti++) {
+    const [a, b, c] = allTriangles[ti];
     const pa = { x: rPts[a][0], y: rPts[a][1] };
     const pb = { x: rPts[b][0], y: rPts[b][1] };
     const pc = { x: rPts[c][0], y: rPts[c][1] };
@@ -2082,11 +2090,15 @@ function cdtTriangulate(input) {
     if (cx < minX - EPS_BOUNDS || cx > maxX + EPS_BOUNDS || cy < minY - EPS_BOUNDS || cy > maxY + EPS_BOUNDS) continue;
     const cross2 = (pb.x - pa.x) * (pc.y - pa.y) - (pb.y - pa.y) * (pc.x - pa.x);
     regions.push(cross2 >= 0 ? [pa, pb, pc] : [pa, pc, pb]);
+    const sorted = [a, b, c].sort((x, y) => x - y);
+    const key = `${sorted[0]},${sorted[1]},${sorted[2]}`;
+    const cdtSaysFree = freeSet.has(key);
     let obstIdx = getObstacleIndex(cx, cy, resolvedObstacles);
-    if (obstIdx === -1) {
-      const INSET = 0.2;
-      const samplePoints = [
-        // Edge midpoints, inset toward centroid
+    if (cdtSaysFree && obstIdx === -1) {
+      obstIdx = -1;
+    } else if (obstIdx === -1 && !cdtSaysFree) {
+      const INSET = 0.3;
+      const samples = [
         {
           x: (pa.x + pb.x) / 2 * (1 - INSET) + cx * INSET,
           y: (pa.y + pb.y) / 2 * (1 - INSET) + cy * INSET
@@ -2100,10 +2112,11 @@ function cdtTriangulate(input) {
           y: (pc.y + pa.y) / 2 * (1 - INSET) + cy * INSET
         }
       ];
-      for (const sp of samplePoints) {
+      for (const sp of samples) {
         obstIdx = getObstacleIndex(sp.x, sp.y, resolvedObstacles);
         if (obstIdx >= 0) break;
       }
+      if (obstIdx === -1) obstIdx = 0;
     }
     regionObstacleIndices.push(obstIdx);
     let rw = { weight: 1, penalty: 0 };
