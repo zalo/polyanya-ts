@@ -2623,6 +2623,35 @@ function rebuildMesh(original, verts, neighbors, dead, weights, penalties, block
       }
     }
   }
+  const validIndices = [];
+  const oldToNewPoly = /* @__PURE__ */ new Map();
+  for (let i = 0; i < polygons.length; i++) {
+    const uniqueVerts = new Set(polygons[i].vertices);
+    if (uniqueVerts.size >= 3) {
+      oldToNewPoly.set(i, validIndices.length);
+      validIndices.push(i);
+    }
+  }
+  if (validIndices.length < polygons.length) {
+    const newPolys = validIndices.map((oldIdx) => {
+      const p = polygons[oldIdx];
+      return {
+        ...p,
+        polygons: p.polygons.map(
+          (adj) => adj === -1 ? -1 : oldToNewPoly.get(adj) ?? -1
+        )
+      };
+    });
+    for (const v of vertices) {
+      v.polygons = v.polygons.map(
+        (pi) => pi === -1 ? -1 : oldToNewPoly.get(pi) ?? -1
+      );
+      v.originalPolygons = v.originalPolygons.map(
+        (pi) => pi === -1 ? -1 : oldToNewPoly.get(pi) ?? -1
+      );
+    }
+    return Mesh.fromData(vertices, newPolys);
+  }
   return Mesh.fromData(vertices, polygons);
 }
 function polyCenter(poly, sortedUsedVerts, original) {

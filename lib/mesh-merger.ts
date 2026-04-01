@@ -468,6 +468,39 @@ function rebuildMesh(
     }
   }
 
+  // Filter out degenerate polygons (< 3 unique vertices) that arise
+  // from vertex snapping during mesh building. Update neighbor references.
+  const validIndices: number[] = []
+  const oldToNewPoly = new Map<number, number>()
+  for (let i = 0; i < polygons.length; i++) {
+    const uniqueVerts = new Set(polygons[i]!.vertices)
+    if (uniqueVerts.size >= 3) {
+      oldToNewPoly.set(i, validIndices.length)
+      validIndices.push(i)
+    }
+  }
+  if (validIndices.length < polygons.length) {
+    const newPolys = validIndices.map((oldIdx) => {
+      const p = polygons[oldIdx]!
+      return {
+        ...p,
+        polygons: p.polygons.map((adj) =>
+          adj === -1 ? -1 : (oldToNewPoly.get(adj) ?? -1),
+        ),
+      }
+    })
+    // Remap vertex polygon references
+    for (const v of vertices) {
+      v.polygons = v.polygons.map((pi) =>
+        pi === -1 ? -1 : (oldToNewPoly.get(pi) ?? -1),
+      )
+      v.originalPolygons = v.originalPolygons.map((pi) =>
+        pi === -1 ? -1 : (oldToNewPoly.get(pi) ?? -1),
+      )
+    }
+    return Mesh.fromData(vertices, newPolys)
+  }
+
   return Mesh.fromData(vertices, polygons)
 }
 
