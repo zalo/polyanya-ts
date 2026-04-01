@@ -10,8 +10,13 @@ export interface Point {
 /** A mesh vertex with adjacency information */
 export interface Vertex {
   p: Point
-  /** Adjacent polygon indices (CCW order). -1 means obstacle/boundary. */
+  /** Adjacent polygon indices (CCW order). -1 means obstacle/boundary.
+   *  When polygons are blocked, their indices are replaced with -1 here.
+   *  Use `originalPolygons` to recover the true polygon indices. */
   polygons: number[]
+  /** Original polygon indices before any blocked→-1 replacement.
+   *  Used by setObstacleBlocked to rebuild `polygons` after toggling. */
+  originalPolygons: number[]
   /** True if this vertex touches an obstacle or mesh boundary */
   isCorner: boolean
   /** True if multiple non-traversable neighbors (ambiguous corner) */

@@ -231,7 +231,7 @@ var Mesh = class _Mesh {
           }
         }
       }
-      this.vertices[i] = { p: { x, y }, polygons: polys, isCorner, isAmbig };
+      this.vertices[i] = { p: { x, y }, polygons: polys, originalPolygons: [...polys], isCorner, isAmbig };
     }
     this.maxPolySides = 0;
     for (let i = 0; i < P; i++) {
@@ -571,6 +571,28 @@ var Mesh = class _Mesh {
         this.polygons[i].blocked = blocked;
       }
     }
+    this.rebuildVertexAdjacency();
+  }
+  /** Rebuild all vertex polygon lists and corner flags based on current
+   *  polygon blocked states. Called after setObstacleBlocked. */
+  rebuildVertexAdjacency() {
+    for (const v of this.vertices) {
+      for (let i = 0; i < v.originalPolygons.length; i++) {
+        const pi = v.originalPolygons[i];
+        v.polygons[i] = pi >= 0 && this.polygons[pi]?.blocked ? -1 : pi;
+      }
+      let isCorner = false;
+      let isAmbig = false;
+      for (const pi of v.polygons) {
+        if (pi === -1) {
+          if (isCorner) isAmbig = true;
+          else isCorner = true;
+        }
+      }
+      v.isCorner = isCorner;
+      v.isAmbig = isAmbig;
+    }
+    this.precalcPointLocation();
   }
   /**
    * Get all unique obstacle indices present in the mesh.
@@ -1815,14 +1837,21 @@ function buildMeshFromRegions(input) {
       if (idx === -1) continue;
       const prevEdgeAdj = poly.polygons[(idx + poly.vertices.length - 1) % poly.vertices.length];
       const nextEdgeAdj = poly.polygons[idx];
-      if (prevEdgeAdj === -1 || nextEdgeAdj === -1) {
+      const prevIsBoundary = prevEdgeAdj === -1 || prevEdgeAdj >= 0 && polygons[prevEdgeAdj].blocked;
+      const nextIsBoundary = nextEdgeAdj === -1 || nextEdgeAdj >= 0 && polygons[nextEdgeAdj].blocked;
+      if (prevIsBoundary || nextIsBoundary) {
         if (isCorner) isAmbig = true;
         else isCorner = true;
       }
     }
+    const originalPolys = [...polys];
+    const effectivePolys = polys.map(
+      (pi) => polygons[pi].blocked ? -1 : pi
+    );
     return {
       p: { x: v.x, y: v.y },
-      polygons: polys,
+      polygons: effectivePolys,
+      originalPolygons: originalPolys,
       isCorner,
       isAmbig
     };
@@ -2503,12 +2532,16 @@ function rebuildMesh(original, verts, neighbors, dead, weights, penalties, block
       const N = poly.vertices.length;
       const enterAdj = poly.polygons[idx];
       const leaveAdj = poly.polygons[(idx + 1) % N];
-      if (enterAdj === -1 || leaveAdj === -1) {
+      const enterBlocked = enterAdj === -1 || enterAdj >= 0 && polygons[enterAdj].blocked;
+      const leaveBlocked = leaveAdj === -1 || leaveAdj >= 0 && polygons[leaveAdj].blocked;
+      if (enterBlocked || leaveBlocked) {
         if (isCorner) isAmbig = true;
         else isCorner = true;
       }
     }
-    return { p: { x: v.p.x, y: v.p.y }, polygons: polys, isCorner, isAmbig };
+    const originalPolys = [...polys];
+    const effectivePolys = polys.map((pi) => polygons[pi].blocked ? -1 : pi);
+    return { p: { x: v.p.x, y: v.p.y }, polygons: effectivePolys, originalPolygons: originalPolys, isCorner, isAmbig };
   });
   return Mesh.fromData(vertices, polygons);
 }

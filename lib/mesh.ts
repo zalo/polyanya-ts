@@ -129,7 +129,7 @@ export class Mesh {
         }
       }
 
-      this.vertices[i] = { p: { x, y }, polygons: polys, isCorner, isAmbig }
+      this.vertices[i] = { p: { x, y }, polygons: polys, originalPolygons: [...polys], isCorner, isAmbig }
     }
 
     // Read polygons
@@ -533,6 +533,34 @@ export class Mesh {
         this.polygons[i]!.blocked = blocked
       }
     }
+    // Rebuild vertex adjacency: blocked polygons appear as -1 in vertex
+    // polygon lists, and vertex isCorner/isAmbig flags are recomputed.
+    this.rebuildVertexAdjacency()
+  }
+
+  /** Rebuild all vertex polygon lists and corner flags based on current
+   *  polygon blocked states. Called after setObstacleBlocked. */
+  private rebuildVertexAdjacency(): void {
+    for (const v of this.vertices) {
+      // Rebuild from originalPolygons: blocked → -1, unblocked → original
+      for (let i = 0; i < v.originalPolygons.length; i++) {
+        const pi = v.originalPolygons[i]!
+        v.polygons[i] = (pi >= 0 && this.polygons[pi]?.blocked) ? -1 : pi
+      }
+      // Recompute isCorner/isAmbig
+      let isCorner = false
+      let isAmbig = false
+      for (const pi of v.polygons) {
+        if (pi === -1) {
+          if (isCorner) isAmbig = true
+          else isCorner = true
+        }
+      }
+      v.isCorner = isCorner
+      v.isAmbig = isAmbig
+    }
+    // Rebuild slab index since polygon visibility changed
+    this.precalcPointLocation()
   }
 
   /**

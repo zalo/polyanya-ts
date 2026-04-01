@@ -438,15 +438,21 @@ function rebuildMesh(
       const idx = poly.vertices.indexOf(newVi)
       if (idx === -1) continue
       const N = poly.vertices.length
-      // Edges incident to this vertex
+      // Edges incident to this vertex — treat blocked neighbors as -1
       const enterAdj = poly.polygons[idx]!
       const leaveAdj = poly.polygons[(idx + 1) % N]!
-      if (enterAdj === -1 || leaveAdj === -1) {
+      const enterBlocked = enterAdj === -1 || (enterAdj >= 0 && polygons[enterAdj]!.blocked)
+      const leaveBlocked = leaveAdj === -1 || (leaveAdj >= 0 && polygons[leaveAdj]!.blocked)
+      if (enterBlocked || leaveBlocked) {
         if (isCorner) isAmbig = true; else isCorner = true
       }
     }
 
-    return { p: { x: v.p.x, y: v.p.y }, polygons: polys, isCorner, isAmbig }
+    // Store original polys, replace blocked with -1 in effective list
+    const originalPolys = [...polys]
+    const effectivePolys = polys.map((pi) => polygons[pi]!.blocked ? -1 : pi)
+
+    return { p: { x: v.p.x, y: v.p.y }, polygons: effectivePolys, originalPolygons: originalPolys, isCorner, isAmbig }
   })
 
   return Mesh.fromData(vertices, polygons)

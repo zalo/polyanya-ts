@@ -161,18 +161,29 @@ export function buildMeshFromRegions(input: MeshBuilderInput): Mesh {
       const poly = polygons[pi]!
       const idx = poly.vertices.indexOf(vi)
       if (idx === -1) continue
-      // Check the edge before and after this vertex
+      // Check the edge before and after this vertex.
+      // An edge is a boundary if it's -1 (no neighbor) OR if the neighbor
+      // polygon is blocked (obstacle interior — acts as a wall).
       const prevEdgeAdj = poly.polygons[(idx + poly.vertices.length - 1) % poly.vertices.length]!
       const nextEdgeAdj = poly.polygons[idx]!
-      if (prevEdgeAdj === -1 || nextEdgeAdj === -1) {
+      const prevIsBoundary = prevEdgeAdj === -1 || (prevEdgeAdj >= 0 && polygons[prevEdgeAdj]!.blocked)
+      const nextIsBoundary = nextEdgeAdj === -1 || (nextEdgeAdj >= 0 && polygons[nextEdgeAdj]!.blocked)
+      if (prevIsBoundary || nextIsBoundary) {
         if (isCorner) isAmbig = true
         else isCorner = true
       }
     }
 
+    // Store original indices, then replace blocked with -1 for the active list
+    const originalPolys = [...polys]
+    const effectivePolys = polys.map((pi) =>
+      polygons[pi]!.blocked ? -1 : pi,
+    )
+
     return {
       p: { x: v.x, y: v.y },
-      polygons: polys,
+      polygons: effectivePolys,
+      originalPolygons: originalPolys,
       isCorner,
       isAmbig,
     }
