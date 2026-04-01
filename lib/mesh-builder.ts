@@ -46,10 +46,19 @@ export function buildMeshFromRegions(input: MeshBuilderInput): Mesh {
     return idx
   }
 
-  // Convert regions to vertex indices
-  const regionIndices: number[][] = regions.map((region) =>
-    region.map((p) => getVertexIndex(p)),
-  )
+  // Convert regions to vertex indices, removing duplicate consecutive verts
+  // (which arise when CDT vertices snap to the same deduped position)
+  const regionIndices: number[][] = regions.map((region) => {
+    const indices = region.map((p) => getVertexIndex(p))
+    // Remove consecutive duplicates (including wrap-around)
+    const deduped: number[] = []
+    for (let i = 0; i < indices.length; i++) {
+      if (indices[i] !== indices[(i + 1) % indices.length]) {
+        deduped.push(indices[i]!)
+      }
+    }
+    return deduped
+  })
 
   // Step 2: Build edge-to-polygon adjacency
   // An edge is identified by its two vertex indices (sorted)
@@ -60,6 +69,7 @@ export function buildMeshFromRegions(input: MeshBuilderInput): Mesh {
   }
 
   for (let pi = 0; pi < regionIndices.length; pi++) {
+    if (regionIndices[pi]!.length < 3) continue // skip degenerate regions
     const verts = regionIndices[pi]!
     for (let j = 0; j < verts.length; j++) {
       const a = verts[j]!

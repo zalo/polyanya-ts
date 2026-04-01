@@ -1764,14 +1764,22 @@ function buildMeshFromRegions(input) {
     vertexMap.set(key, idx);
     return idx;
   };
-  const regionIndices = regions.map(
-    (region) => region.map((p) => getVertexIndex(p))
-  );
+  const regionIndices = regions.map((region) => {
+    const indices = region.map((p) => getVertexIndex(p));
+    const deduped = [];
+    for (let i = 0; i < indices.length; i++) {
+      if (indices[i] !== indices[(i + 1) % indices.length]) {
+        deduped.push(indices[i]);
+      }
+    }
+    return deduped;
+  });
   const edgeToPolys = /* @__PURE__ */ new Map();
   const edgeKey = (a, b) => {
     return a < b ? `${a},${b}` : `${b},${a}`;
   };
   for (let pi = 0; pi < regionIndices.length; pi++) {
+    if (regionIndices[pi].length < 3) continue;
     const verts = regionIndices[pi];
     for (let j = 0; j < verts.length; j++) {
       const a = verts[j];
