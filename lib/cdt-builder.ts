@@ -200,22 +200,21 @@ export function cdtTriangulate(input: {
     regions.push(cross >= 0 ? [pa, pb, pc] : [pa, pc, pb])
 
     // Classify: inside an obstacle or free space?
-    // Sample multiple points (centroid + edge midpoints + quarter-points)
-    // to catch thin triangles that straddle obstacle boundaries where the
-    // centroid alone might land on the wrong side.
-    // Conservative: if ANY sample point is inside an obstacle, the whole
-    // triangle is classified as obstacle-interior.
+    // Sample the centroid plus additional points inset toward the centroid
+    // to catch thin triangles that straddle obstacle boundaries.
+    // Points are inset by 20% toward the centroid to avoid landing exactly
+    // on CDT constraint edges (which are obstacle polygon boundaries).
     let obstIdx = getObstacleIndex(cx, cy, resolvedObstacles)
     if (obstIdx === -1) {
-      // Edge midpoints
+      const INSET = 0.2 // 20% toward centroid
       const samplePoints = [
-        { x: (pa.x + pb.x) / 2, y: (pa.y + pb.y) / 2 },
-        { x: (pb.x + pc.x) / 2, y: (pb.y + pc.y) / 2 },
-        { x: (pc.x + pa.x) / 2, y: (pc.y + pa.y) / 2 },
-        // Quarter-points (between centroid and each vertex)
-        { x: (cx + pa.x) / 2, y: (cy + pa.y) / 2 },
-        { x: (cx + pb.x) / 2, y: (cy + pb.y) / 2 },
-        { x: (cx + pc.x) / 2, y: (cy + pc.y) / 2 },
+        // Edge midpoints, inset toward centroid
+        { x: (pa.x + pb.x) / 2 * (1 - INSET) + cx * INSET,
+          y: (pa.y + pb.y) / 2 * (1 - INSET) + cy * INSET },
+        { x: (pb.x + pc.x) / 2 * (1 - INSET) + cx * INSET,
+          y: (pb.y + pc.y) / 2 * (1 - INSET) + cy * INSET },
+        { x: (pc.x + pa.x) / 2 * (1 - INSET) + cx * INSET,
+          y: (pc.y + pa.y) / 2 * (1 - INSET) + cy * INSET },
       ]
       for (const sp of samplePoints) {
         obstIdx = getObstacleIndex(sp.x, sp.y, resolvedObstacles)
