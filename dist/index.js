@@ -573,7 +573,7 @@ var Mesh = class _Mesh {
     }
     this.rebuildVertexAdjacency();
   }
-  /** Rebuild all vertex polygon lists and corner flags based on current
+  /** Rebuild all vertex/polygon adjacency and flags based on current
    *  polygon blocked states. Called after setObstacleBlocked. */
   rebuildVertexAdjacency() {
     for (const v of this.vertices) {
@@ -591,6 +591,19 @@ var Mesh = class _Mesh {
       }
       v.isCorner = isCorner;
       v.isAmbig = isAmbig;
+    }
+    for (const poly of this.polygons) {
+      let foundTrav = false;
+      poly.isOneWay = true;
+      for (const adjIdx of poly.polygons) {
+        const isTraversable = adjIdx !== -1 && !this.polygons[adjIdx]?.blocked;
+        if (isTraversable) {
+          if (foundTrav) {
+            poly.isOneWay = false;
+            break;
+          } else foundTrav = true;
+        }
+      }
     }
     this.precalcPointLocation();
   }
@@ -1812,6 +1825,18 @@ function buildMeshFromRegions(input) {
       obstacleIndex: input.regionObstacleIndices?.[pi] ?? -1
     };
   });
+  for (const poly of polygons) {
+    let ft = false;
+    poly.isOneWay = true;
+    for (const adj of poly.polygons) {
+      if (adj !== -1 && !polygons[adj].blocked) {
+        if (ft) {
+          poly.isOneWay = false;
+          break;
+        } else ft = true;
+      }
+    }
+  }
   const vertexPolygons = new Array(vertices.length).fill(null).map(() => []);
   for (let pi = 0; pi < polygons.length; pi++) {
     for (const vi of polygons[pi].vertices) {
@@ -2578,6 +2603,18 @@ function rebuildMesh(original, verts, neighbors, dead, weights, penalties, block
     const effectivePolys = polys.map((pi) => polygons[pi].blocked ? -1 : pi);
     return { p: { x: v.p.x, y: v.p.y }, polygons: effectivePolys, originalPolygons: originalPolys, isCorner, isAmbig };
   });
+  for (const poly of polygons) {
+    let ft = false;
+    poly.isOneWay = true;
+    for (const adj of poly.polygons) {
+      if (adj !== -1 && !polygons[adj].blocked) {
+        if (ft) {
+          poly.isOneWay = false;
+          break;
+        } else ft = true;
+      }
+    }
+  }
   return Mesh.fromData(vertices, polygons);
 }
 function polyCenter(poly, sortedUsedVerts, original) {

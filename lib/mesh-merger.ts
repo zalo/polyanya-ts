@@ -408,6 +408,7 @@ function rebuildMesh(
       minY = Math.min(minY, p.y); maxY = Math.max(maxY, p.y)
     }
 
+    // Preliminary isOneWay (ignore blocked since polygons array may be incomplete)
     let foundTrav = false, isOneWay = true
     for (const adj of polyNeigh) {
       if (adj !== -1) { if (foundTrav) isOneWay = false; else foundTrav = true }
@@ -454,6 +455,18 @@ function rebuildMesh(
 
     return { p: { x: v.p.x, y: v.p.y }, polygons: effectivePolys, originalPolygons: originalPolys, isCorner, isAmbig }
   })
+
+  // Fix isOneWay with blocked awareness (all polygons exist now)
+  for (const poly of polygons) {
+    let ft = false
+    poly.isOneWay = true
+    for (const adj of poly.polygons) {
+      if (adj !== -1 && !polygons[adj]!.blocked) {
+        if (ft) { poly.isOneWay = false; break }
+        else ft = true
+      }
+    }
+  }
 
   return Mesh.fromData(vertices, polygons)
 }

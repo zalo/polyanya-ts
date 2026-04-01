@@ -538,16 +538,15 @@ export class Mesh {
     this.rebuildVertexAdjacency()
   }
 
-  /** Rebuild all vertex polygon lists and corner flags based on current
+  /** Rebuild all vertex/polygon adjacency and flags based on current
    *  polygon blocked states. Called after setObstacleBlocked. */
   private rebuildVertexAdjacency(): void {
+    // Rebuild vertex polygon lists
     for (const v of this.vertices) {
-      // Rebuild from originalPolygons: blocked → -1, unblocked → original
       for (let i = 0; i < v.originalPolygons.length; i++) {
         const pi = v.originalPolygons[i]!
         v.polygons[i] = (pi >= 0 && this.polygons[pi]?.blocked) ? -1 : pi
       }
-      // Recompute isCorner/isAmbig
       let isCorner = false
       let isAmbig = false
       for (const pi of v.polygons) {
@@ -559,6 +558,23 @@ export class Mesh {
       v.isCorner = isCorner
       v.isAmbig = isAmbig
     }
+
+    // Recompute isOneWay for ALL polygons.
+    // A polygon is one-way if it has exactly one traversable (non-blocked,
+    // non-boundary) neighbor. This changes when obstacles are toggled.
+    for (const poly of this.polygons) {
+      let foundTrav = false
+      poly.isOneWay = true
+      for (const adjIdx of poly.polygons) {
+        const isTraversable =
+          adjIdx !== -1 && !(this.polygons[adjIdx]?.blocked)
+        if (isTraversable) {
+          if (foundTrav) { poly.isOneWay = false; break }
+          else foundTrav = true
+        }
+      }
+    }
+
     // Rebuild slab index since polygon visibility changed
     this.precalcPointLocation()
   }

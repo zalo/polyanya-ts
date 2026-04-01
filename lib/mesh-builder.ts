@@ -101,6 +101,8 @@ export function buildMeshFromRegions(input: MeshBuilderInput): Mesh {
       maxY = Math.max(maxY, vp.y)
     }
 
+    // Preliminary isOneWay (ignores blocked status — corrected after
+    // all polygons are constructed, in the second pass below)
     let foundTrav = false
     let isOneWay = true
     for (const adj of adjPolys) {
@@ -125,6 +127,19 @@ export function buildMeshFromRegions(input: MeshBuilderInput): Mesh {
       obstacleIndex: input.regionObstacleIndices?.[pi] ?? -1,
     }
   })
+
+  // Step 3b: Fix isOneWay now that all polygons exist (blocked neighbors
+  // should not count as traversable)
+  for (const poly of polygons) {
+    let ft = false
+    poly.isOneWay = true
+    for (const adj of poly.polygons) {
+      if (adj !== -1 && !polygons[adj]!.blocked) {
+        if (ft) { poly.isOneWay = false; break }
+        else ft = true
+      }
+    }
+  }
 
   // Step 4: Build vertex objects with adjacency
   const vertexPolygons: number[][] = new Array(vertices.length)

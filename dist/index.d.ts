@@ -250,7 +250,7 @@ declare class Mesh {
      *   mesh.setObstacleBlocked(obstIdx, true)   // re-block
      */
     setObstacleBlocked(obstacleIdx: number, blocked: boolean): void;
-    /** Rebuild all vertex polygon lists and corner flags based on current
+    /** Rebuild all vertex/polygon adjacency and flags based on current
      *  polygon blocked states. Called after setObstacleBlocked. */
     private rebuildVertexAdjacency;
     /**
