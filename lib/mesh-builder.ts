@@ -47,18 +47,24 @@ export function buildMeshFromRegions(input: MeshBuilderInput): Mesh {
   }
 
   // Convert regions to vertex indices, removing duplicate consecutive verts
-  // (which arise when CDT vertices snap to the same deduped position)
-  const regionIndices: number[][] = regions.map((region) => {
-    const indices = region.map((p) => getVertexIndex(p))
-    // Remove consecutive duplicates (including wrap-around)
+  // (which arise when CDT vertices snap to the same deduped position).
+  // Also track original region index for weight/obstacleIndex lookup.
+  const allRegionIndices: { verts: number[]; origIdx: number }[] = []
+  for (let ri = 0; ri < regions.length; ri++) {
+    const indices = regions[ri]!.map((p) => getVertexIndex(p))
     const deduped: number[] = []
     for (let i = 0; i < indices.length; i++) {
       if (indices[i] !== indices[(i + 1) % indices.length]) {
         deduped.push(indices[i]!)
       }
     }
-    return deduped
-  })
+    if (deduped.length >= 3) {
+      allRegionIndices.push({ verts: deduped, origIdx: ri })
+    }
+  }
+  // Re-index so polygon indices are contiguous (no gaps from filtered degenerates)
+  const regionIndices = allRegionIndices.map((r) => r.verts)
+  const regionOrigIdx = allRegionIndices.map((r) => r.origIdx)
 
   // Step 2: Build edge-to-polygon adjacency
   // An edge is identified by its two vertex indices (sorted)
@@ -69,7 +75,6 @@ export function buildMeshFromRegions(input: MeshBuilderInput): Mesh {
   }
 
   for (let pi = 0; pi < regionIndices.length; pi++) {
-    if (regionIndices[pi]!.length < 3) continue // skip degenerate regions
     const verts = regionIndices[pi]!
     for (let j = 0; j < verts.length; j++) {
       const a = verts[j]!
@@ -122,7 +127,10 @@ export function buildMeshFromRegions(input: MeshBuilderInput): Mesh {
       }
     }
 
-    const rw = input.regionWeights?.[pi]
+    // Use original region index for weight/obstacle lookups (degenerate
+    // regions were filtered, so pi != original index)
+    const origIdx = regionOrigIdx[pi]!
+    const rw = input.regionWeights?.[origIdx]
     return {
       vertices: verts,
       polygons: adjPolys,
@@ -133,8 +141,8 @@ export function buildMeshFromRegions(input: MeshBuilderInput): Mesh {
       maxY,
       weight: rw?.weight ?? 1.0,
       penalty: rw?.penalty ?? 0.0,
-      blocked: (input.regionObstacleIndices?.[pi] ?? -1) >= 0,
-      obstacleIndex: input.regionObstacleIndices?.[pi] ?? -1,
+      blocked: (input.regionObstacleIndices?.[origIdx] ?? -1) >= 0,
+      obstacleIndex: input.regionObstacleIndices?.[origIdx] ?? -1,
     }
   })
 

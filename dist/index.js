@@ -1764,22 +1764,26 @@ function buildMeshFromRegions(input) {
     vertexMap.set(key, idx);
     return idx;
   };
-  const regionIndices = regions.map((region) => {
-    const indices = region.map((p) => getVertexIndex(p));
+  const allRegionIndices = [];
+  for (let ri = 0; ri < regions.length; ri++) {
+    const indices = regions[ri].map((p) => getVertexIndex(p));
     const deduped = [];
     for (let i = 0; i < indices.length; i++) {
       if (indices[i] !== indices[(i + 1) % indices.length]) {
         deduped.push(indices[i]);
       }
     }
-    return deduped;
-  });
+    if (deduped.length >= 3) {
+      allRegionIndices.push({ verts: deduped, origIdx: ri });
+    }
+  }
+  const regionIndices = allRegionIndices.map((r) => r.verts);
+  const regionOrigIdx = allRegionIndices.map((r) => r.origIdx);
   const edgeToPolys = /* @__PURE__ */ new Map();
   const edgeKey = (a, b) => {
     return a < b ? `${a},${b}` : `${b},${a}`;
   };
   for (let pi = 0; pi < regionIndices.length; pi++) {
-    if (regionIndices[pi].length < 3) continue;
     const verts = regionIndices[pi];
     for (let j = 0; j < verts.length; j++) {
       const a = verts[j];
@@ -1818,7 +1822,8 @@ function buildMeshFromRegions(input) {
         else foundTrav = true;
       }
     }
-    const rw = input.regionWeights?.[pi];
+    const origIdx = regionOrigIdx[pi];
+    const rw = input.regionWeights?.[origIdx];
     return {
       vertices: verts,
       polygons: adjPolys,
@@ -1829,8 +1834,8 @@ function buildMeshFromRegions(input) {
       maxY,
       weight: rw?.weight ?? 1,
       penalty: rw?.penalty ?? 0,
-      blocked: (input.regionObstacleIndices?.[pi] ?? -1) >= 0,
-      obstacleIndex: input.regionObstacleIndices?.[pi] ?? -1
+      blocked: (input.regionObstacleIndices?.[origIdx] ?? -1) >= 0,
+      obstacleIndex: input.regionObstacleIndices?.[origIdx] ?? -1
     };
   });
   for (const poly of polygons) {
