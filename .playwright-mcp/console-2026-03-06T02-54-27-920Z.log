@@ -1,0 +1,11 @@
+[  643698ms] [ERROR] ReferenceError: collectObstacleEdges is not defined
+    at routeTraces (http://localhost:5050/lib/rubberband.ts?t=1772766311330:440:25)
+    at http://localhost:5050/fixtures/pcb-routing.fixture.tsx?t=1772766311330:91:12
+    at Object.useMemo (http://localhost:5050/node_modules/.vite/deps/react-cosmos-plugin-vite_dom.js?v=34ca366b:4465:25)
+    at exports.useMemo (http://localhost:5050/node_modules/.vite/deps/chunk-APEYFWLN.js?v=34ca366b:418:37)
+    at PcbRoutingPlayground (http://localhost:5050/fixtures/pcb-routing.fixture.tsx?t=1772766311330:84:18)
+    at renderWithHooks (http://localhost:5050/node_modules/.vite/deps/react-cosmos-plugin-vite_dom.js?v=34ca366b:3517:25)
+    at updateFunctionComponent (http://localhost:5050/node_modules/.vite/deps/react-cosmos-plugin-vite_dom.js?v=34ca366b:5148:19)
+    at beginWork (http://localhost:5050/node_modules/.vite/deps/react-cosmos-plugin-vite_dom.js?v=34ca366b:5759:18)
+    at performUnitOfWork (http://localhost:5050/node_modules/.vite/deps/react-cosmos-plugin-vite_dom.js?v=34ca366b:8564:18)
+    at workLoopSync (http://localhost:5050/node_modules/.vite/deps/react-cosmos-plugin-vite_dom.js?v=34ca366b:8462:41) @ http://localhost:5050/node_modules/.vite/deps/react-cosmos-plugin-vite_dom.js?v=34ca366b:4775

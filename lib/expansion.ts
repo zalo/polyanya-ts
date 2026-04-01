@@ -93,7 +93,13 @@ function binarySearch<T>(
 
   while (lo <= hi) {
     const mid = lo + Math.floor((hi - lo) / 2)
-    const matchesPred = pred(objects[arr[normalise(mid)]!]!)
+    const obj = objects[arr[normalise(mid)]!]
+    if (!obj) {
+      // Corrupt mesh: polygon references non-existent vertex — skip
+      lo = mid + 1
+      continue
+    }
+    const matchesPred = pred(obj)
 
     if (matchesPred) {
       bestSoFar = mid
@@ -183,7 +189,13 @@ export function getSuccessors(
   }
 
   // General polygon case (N >= 4)
-  return getGeneralSuccessors(node, root, mesh, V, N)
+  try {
+    return getGeneralSuccessors(node, root, mesh, V, N)
+  } catch {
+    // Degenerate mesh — polygon references invalid vertices. Return empty
+    // so the search treats this node as having no successors.
+    return []
+  }
 }
 
 /** Optimized successor generation for triangles */

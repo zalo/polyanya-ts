@@ -297,7 +297,9 @@ var Mesh = class _Mesh {
         minY: pMinY,
         maxY: pMaxY,
         weight: 1,
-        penalty: 0
+        penalty: 0,
+        blocked: false,
+        obstacleIndex: -1
       };
     }
   }
@@ -547,6 +549,42 @@ var Mesh = class _Mesh {
     }
     return notOnMesh;
   }
+  /**
+   * Set a polygon's blocked state. When blocked, the search treats it as
+   * non-traversable (like a -1 adjacency) but the polygon stays in the mesh
+   * so it can be unblocked later without rebuilding the CDT.
+   */
+  setPolygonBlocked(polyIndex, blocked) {
+    if (polyIndex < 0 || polyIndex >= this.polygons.length) return;
+    this.polygons[polyIndex].blocked = blocked;
+  }
+  /**
+   * Block or unblock all polygons with a given obstacleIndex.
+   * Use this to toggle obstacle occupancy per-connection:
+   *   mesh.setObstacleBlocked(obstIdx, false)  // unblock for own connection
+   *   // ... pathfind ...
+   *   mesh.setObstacleBlocked(obstIdx, true)   // re-block
+   */
+  setObstacleBlocked(obstacleIdx, blocked) {
+    for (let i = 0; i < this.polygons.length; i++) {
+      if (this.polygons[i].obstacleIndex === obstacleIdx) {
+        this.polygons[i].blocked = blocked;
+      }
+    }
+  }
+  /**
+   * Get all unique obstacle indices present in the mesh.
+   * Returns indices of obstacles whose polygons are in the mesh
+   * (obstacleIndex >= 0). Useful for discovering which obstacles
+   * can be toggled.
+   */
+  getObstacleIndices() {
+    const set = /* @__PURE__ */ new Set();
+    for (const p of this.polygons) {
+      if (p.obstacleIndex >= 0) set.add(p.obstacleIndex);
+    }
+    return Array.from(set).sort((a, b) => a - b);
+  }
   /** Brute-force point location (for testing/validation) */
   getPointLocationNaive(p) {
     const notOnMesh = {
@@ -654,7 +692,12 @@ function binarySearch(arr, N, objects, lower, upper, pred, isUpperBound) {
   let hi = upper;
   while (lo <= hi) {
     const mid = lo + Math.floor((hi - lo) / 2);
-    const matchesPred = pred(objects[arr[normalise(mid)]]);
+    const obj = objects[arr[normalise(mid)]];
+    if (!obj) {
+      lo = mid + 1;
+      continue;
+    }
+    const matchesPred = pred(obj);
     if (matchesPred) {
       bestSoFar = mid;
     }
@@ -706,7 +749,11 @@ function getSuccessors(node, start, mesh) {
   if (N === 3) {
     return getTriangleSuccessors(node, root, mesh, V);
   }
-  return getGeneralSuccessors(node, root, mesh, V, N);
+  try {
+    return getGeneralSuccessors(node, root, mesh, V, N);
+  } catch {
+    return [];
+  }
 }
 function getTriangleSuccessors(node, root, mesh, V) {
   const successors = [];
@@ -1134,7 +1181,7 @@ var SearchInstance = class {
     const nodes = [];
     for (const succ of successors) {
       const nextPolygon = P[succ.polyLeftInd];
-      if (nextPolygon === -1) {
+      if (nextPolygon === -1 || nextPolygon >= 0 && this.mesh.polygons[nextPolygon].blocked) {
         if (this.goalless && (succ.type === "RIGHT_NON_OBSERVABLE" /* RIGHT_NON_OBSERVABLE */ || succ.type === "LEFT_NON_OBSERVABLE" /* LEFT_NON_OBSERVABLE */)) {
           const pRoot = parent.root === -1 ? this.start : this.mesh.vertices[parent.root].p;
           const recordCorner = (vertIdx, g) => {
@@ -1738,7 +1785,9 @@ function buildMeshFromRegions(input) {
       minY,
       maxY,
       weight: rw?.weight ?? 1,
-      penalty: rw?.penalty ?? 0
+      penalty: rw?.penalty ?? 0,
+      blocked: (input.regionObstacleIndices?.[pi] ?? -1) >= 0,
+      obstacleIndex: input.regionObstacleIndices?.[pi] ?? -1
     };
   });
   const vertexPolygons = new Array(vertices.length).fill(null).map(() => []);
@@ -1988,19 +2037,22 @@ function cdtTriangulate(input) {
         resolved.pts[i] = jitteredPts[i];
       }
     } catch {
-      return { regions: [], regionWeights: [] };
+      return { regions: [], regionWeights: [], regionObstacleIndices: [] };
     }
   }
   const rPts = resolved.pts;
-  const filtered = triangles.filter((tri) => {
+  const triObstacleIndex = [];
+  for (const tri of triangles) {
     const [a, b, c] = tri;
     const cx = (rPts[a][0] + rPts[b][0] + rPts[c][0]) / 3;
     const cy = (rPts[a][1] + rPts[b][1] + rPts[c][1]) / 3;
-    return !pointInAnyObstacle(cx, cy, obstacles);
-  });
+    triObstacleIndex.push(getObstacleIndex(cx, cy, obstacles));
+  }
   const regions = [];
   const regionWeights = [];
-  for (const [a, b, c] of filtered) {
+  const regionObstacleIndices = [];
+  for (let ti = 0; ti < triangles.length; ti++) {
+    const [a, b, c] = triangles[ti];
     const pa = { x: rPts[a][0], y: rPts[a][1] };
     const pb = { x: rPts[b][0], y: rPts[b][1] };
     const pc = { x: rPts[c][0], y: rPts[c][1] };
@@ -2016,8 +2068,9 @@ function cdtTriangulate(input) {
       }
     }
     regionWeights.push(rw);
+    regionObstacleIndices.push(triObstacleIndex[ti]);
   }
-  return { regions, regionWeights };
+  return { regions, regionWeights, regionObstacleIndices };
 }
 function pointInPolygon(px, py, poly) {
   let inside = false;
@@ -2029,11 +2082,11 @@ function pointInPolygon(px, py, poly) {
   }
   return inside;
 }
-function pointInAnyObstacle(px, py, obstacles) {
-  for (const obstacle of obstacles) {
-    if (pointInPolygon(px, py, obstacle)) return true;
+function getObstacleIndex(px, py, obstacles) {
+  for (let i = 0; i < obstacles.length; i++) {
+    if (pointInPolygon(px, py, obstacles[i])) return i;
   }
-  return false;
+  return -1;
 }
 function mergeWeightedRegions(regions) {
   if (regions.length <= 1) return regions;
@@ -2110,6 +2163,8 @@ function mergeMesh(mesh) {
   const area = new Array(n);
   const weights = new Array(n);
   const penalties = new Array(n);
+  const polyBlocked = new Array(n);
+  const polyObstIdx = new Array(n);
   for (let i = 0; i < n; i++) {
     const p = mesh.polygons[i];
     verts[i] = p.vertices.slice();
@@ -2117,6 +2172,8 @@ function mergeMesh(mesh) {
     area[i] = polyArea(p.vertices, mesh);
     weights[i] = p.weight;
     penalties[i] = p.penalty;
+    polyBlocked[i] = p.blocked;
+    polyObstIdx[i] = p.obstacleIndex;
   }
   const ufParent = new Array(n);
   const ufRank = new Array(n).fill(0);
@@ -2183,6 +2240,7 @@ function mergeMesh(mesh) {
     const yIdx = resolve(yRaw);
     if (yIdx === -1 || yIdx === xIdx || dead[yIdx]) return false;
     if (weights[xIdx] !== weights[yIdx] || penalties[xIdx] !== penalties[yIdx]) return false;
+    if (polyObstIdx[xIdx] !== polyObstIdx[yIdx]) return false;
     const yV = verts[yIdx];
     const N = xV.length;
     const M = yV.length;
@@ -2377,7 +2435,7 @@ function mergeMesh(mesh) {
       }
     }
   }
-  return rebuildMesh(mesh, verts, nb, dead, weights, penalties);
+  return rebuildMesh(mesh, verts, nb, dead, weights, penalties, polyBlocked, polyObstIdx);
 }
 function polyArea(vertexIndices, mesh) {
   let a = 0;
@@ -2389,7 +2447,7 @@ function polyArea(vertexIndices, mesh) {
   }
   return Math.abs(a) / 2;
 }
-function rebuildMesh(original, verts, neighbors, dead, weights, penalties) {
+function rebuildMesh(original, verts, neighbors, dead, weights, penalties, blockedArr, obstIdxArr) {
   const aliveIndices = [];
   const oldToNew = new Array(verts.length).fill(-1);
   for (let i = 0; i < verts.length; i++) {
@@ -2427,7 +2485,7 @@ function rebuildMesh(original, verts, neighbors, dead, weights, penalties) {
         else foundTrav = true;
       }
     }
-    return { vertices: polyVerts, polygons: polyNeigh, isOneWay, minX, maxX, minY, maxY, weight: weights[oldIdx], penalty: penalties[oldIdx] };
+    return { vertices: polyVerts, polygons: polyNeigh, isOneWay, minX, maxX, minY, maxY, weight: weights[oldIdx], penalty: penalties[oldIdx], blocked: blockedArr[oldIdx], obstacleIndex: obstIdxArr[oldIdx] };
   });
   const vertexPolygons = new Array(sortedUsedVerts.length).fill(null).map(() => []);
   for (let pi = 0; pi < polygons.length; pi++) {

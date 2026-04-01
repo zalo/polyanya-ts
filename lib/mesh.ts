@@ -205,6 +205,8 @@ export class Mesh {
         maxY: pMaxY,
         weight: 1.0,
         penalty: 0.0,
+        blocked: false,
+        obstacleIndex: -1,
       }
     }
   }
@@ -506,6 +508,45 @@ export class Mesh {
     }
 
     return notOnMesh
+  }
+
+  /**
+   * Set a polygon's blocked state. When blocked, the search treats it as
+   * non-traversable (like a -1 adjacency) but the polygon stays in the mesh
+   * so it can be unblocked later without rebuilding the CDT.
+   */
+  setPolygonBlocked(polyIndex: number, blocked: boolean): void {
+    if (polyIndex < 0 || polyIndex >= this.polygons.length) return
+    this.polygons[polyIndex]!.blocked = blocked
+  }
+
+  /**
+   * Block or unblock all polygons with a given obstacleIndex.
+   * Use this to toggle obstacle occupancy per-connection:
+   *   mesh.setObstacleBlocked(obstIdx, false)  // unblock for own connection
+   *   // ... pathfind ...
+   *   mesh.setObstacleBlocked(obstIdx, true)   // re-block
+   */
+  setObstacleBlocked(obstacleIdx: number, blocked: boolean): void {
+    for (let i = 0; i < this.polygons.length; i++) {
+      if (this.polygons[i]!.obstacleIndex === obstacleIdx) {
+        this.polygons[i]!.blocked = blocked
+      }
+    }
+  }
+
+  /**
+   * Get all unique obstacle indices present in the mesh.
+   * Returns indices of obstacles whose polygons are in the mesh
+   * (obstacleIndex >= 0). Useful for discovering which obstacles
+   * can be toggled.
+   */
+  getObstacleIndices(): number[] {
+    const set = new Set<number>()
+    for (const p of this.polygons) {
+      if (p.obstacleIndex >= 0) set.add(p.obstacleIndex)
+    }
+    return Array.from(set).sort((a, b) => a - b)
   }
 
   /** Brute-force point location (for testing/validation) */

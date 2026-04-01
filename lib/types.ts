@@ -34,6 +34,15 @@ export interface Polygon {
   weight: number
   /** Additive entry cost (default 0.0) */
   penalty: number
+  /** When true, the polygon is treated as non-traversable by the search
+   *  (equivalent to a -1 adjacency) but remains in the mesh so it can be
+   *  toggled back to traversable without rebuilding the CDT.
+   *  Use Mesh.setPolygonBlocked() to toggle. */
+  blocked: boolean
+  /** Index of the obstacle that this polygon was inside during CDT
+   *  triangulation, or -1 if it's free space.  Used to identify which
+   *  polygons to block/unblock for per-connection obstacle exclusion. */
+  obstacleIndex: number
 }
 
 /** A weighted region that the pathfinder prefers to avoid but can traverse */

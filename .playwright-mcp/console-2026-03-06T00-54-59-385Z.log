@@ -1,0 +1,36 @@
+[     999ms] [ERROR] Failed to load resource: the server responded with a status of 504 (Outdated Optimize Dep) @ http://localhost:5050/node_modules/.vite/deps/three_examples_jsm_renderers_CSS2DRenderer__js.js?v=4a7fd313:0
+[    1003ms] Failed to fetch dynamically imported module: http://localhost:5050/@id/__x00__virtual:cosmos-imports
+[    1454ms] [WARNING] [.WebGL-0x28b4000aa200]GL Driver Message (OpenGL, Performance, GL_CLOSE_PATH_NV, High): GPU stall due to ReadPixels @ http://localhost:5050/:0
+[ 5575278ms] [ERROR] TypeError: Cannot read properties of undefined (reading 'length')
+    at buildPathFromArcs (http://localhost:5050/lib/rubberband.ts?t=1772764074480:133:12)
+    at routeTraces (http://localhost:5050/lib/rubberband.ts?t=1772764074480:19:46)
+    at http://localhost:5050/fixtures/pcb-routing.fixture.tsx?t=1772764074480:91:12
+    at Object.useMemo (http://localhost:5050/node_modules/.vite/deps/react-cosmos-plugin-vite_dom.js?v=34ca366b:4465:25)
+    at exports.useMemo (http://localhost:5050/node_modules/.vite/deps/chunk-APEYFWLN.js?v=34ca366b:418:37)
+    at PcbRoutingPlayground (http://localhost:5050/fixtures/pcb-routing.fixture.tsx?t=1772764074480:84:18)
+    at renderWithHooks (http://localhost:5050/node_modules/.vite/deps/react-cosmos-plugin-vite_dom.js?v=34ca366b:3517:25)
+    at updateFunctionComponent (http://localhost:5050/node_modules/.vite/deps/react-cosmos-plugin-vite_dom.js?v=34ca366b:5148:19)
+    at beginWork (http://localhost:5050/node_modules/.vite/deps/react-cosmos-plugin-vite_dom.js?v=34ca366b:5759:18)
+    at performUnitOfWork (http://localhost:5050/node_modules/.vite/deps/react-cosmos-plugin-vite_dom.js?v=34ca366b:8564:18) @ http://localhost:5050/node_modules/.vite/deps/react-cosmos-plugin-vite_dom.js?v=34ca366b:4775
+[ 7062025ms] [ERROR] ReferenceError: mesh is not defined
+    at buildFinalPath (http://localhost:5050/lib/rubberband.ts?t=1772765561169:358:37)
+    at routeTraces (http://localhost:5050/lib/rubberband.ts?t=1772765561169:458:46)
+    at http://localhost:5050/fixtures/pcb-routing.fixture.tsx?t=1772765561169:91:12
+    at Object.useMemo (http://localhost:5050/node_modules/.vite/deps/react-cosmos-plugin-vite_dom.js?v=34ca366b:4465:25)
+    at exports.useMemo (http://localhost:5050/node_modules/.vite/deps/chunk-APEYFWLN.js?v=34ca366b:418:37)
+    at PcbRoutingPlayground (http://localhost:5050/fixtures/pcb-routing.fixture.tsx?t=1772765561169:84:18)
+    at renderWithHooks (http://localhost:5050/node_modules/.vite/deps/react-cosmos-plugin-vite_dom.js?v=34ca366b:3517:25)
+    at updateFunctionComponent (http://localhost:5050/node_modules/.vite/deps/react-cosmos-plugin-vite_dom.js?v=34ca366b:5148:19)
+    at beginWork (http://localhost:5050/node_modules/.vite/deps/react-cosmos-plugin-vite_dom.js?v=34ca366b:5759:18)
+    at performUnitOfWork (http://localhost:5050/node_modules/.vite/deps/react-cosmos-plugin-vite_dom.js?v=34ca366b:8564:18) @ http://localhost:5050/node_modules/.vite/deps/react-cosmos-plugin-vite_dom.js?v=34ca366b:4775
+[ 7812235ms] [ERROR] ReferenceError: collectObstacleEdges is not defined
+    at routeTraces (http://localhost:5050/lib/rubberband.ts?t=1772766311330:440:25)
+    at http://localhost:5050/fixtures/pcb-routing.fixture.tsx?t=1772766311330:91:12
+    at Object.useMemo (http://localhost:5050/node_modules/.vite/deps/react-cosmos-plugin-vite_dom.js?v=34ca366b:4465:25)
+    at exports.useMemo (http://localhost:5050/node_modules/.vite/deps/chunk-APEYFWLN.js?v=34ca366b:418:37)
+    at PcbRoutingPlayground (http://localhost:5050/fixtures/pcb-routing.fixture.tsx?t=1772766311330:84:18)
+    at renderWithHooks (http://localhost:5050/node_modules/.vite/deps/react-cosmos-plugin-vite_dom.js?v=34ca366b:3517:25)
+    at updateFunctionComponent (http://localhost:5050/node_modules/.vite/deps/react-cosmos-plugin-vite_dom.js?v=34ca366b:5148:19)
+    at beginWork (http://localhost:5050/node_modules/.vite/deps/react-cosmos-plugin-vite_dom.js?v=34ca366b:5759:18)
+    at performUnitOfWork (http://localhost:5050/node_modules/.vite/deps/react-cosmos-plugin-vite_dom.js?v=34ca366b:8564:18)
+    at workLoopSync (http://localhost:5050/node_modules/.vite/deps/react-cosmos-plugin-vite_dom.js?v=34ca366b:8462:41) @ http://localhost:5050/node_modules/.vite/deps/react-cosmos-plugin-vite_dom.js?v=34ca366b:4775

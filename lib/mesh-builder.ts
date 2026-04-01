@@ -10,6 +10,10 @@ import type { Point, Polygon, Vertex } from "./types.ts"
 export interface MeshBuilderInput {
   regions: Point[][]
   regionWeights?: { weight: number; penalty: number }[]
+  /** Per-region obstacle index from CDT (-1 = free space).
+   *  When present, regions with obstacleIndex >= 0 will have
+   *  their polygon's `blocked` flag set to true initially. */
+  regionObstacleIndices?: number[]
 }
 
 /**
@@ -117,6 +121,8 @@ export function buildMeshFromRegions(input: MeshBuilderInput): Mesh {
       maxY,
       weight: rw?.weight ?? 1.0,
       penalty: rw?.penalty ?? 0.0,
+      blocked: (input.regionObstacleIndices?.[pi] ?? -1) >= 0,
+      obstacleIndex: input.regionObstacleIndices?.[pi] ?? -1,
     }
   })
 

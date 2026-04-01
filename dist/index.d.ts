@@ -31,6 +31,15 @@ interface Polygon {
     weight: number;
     /** Additive entry cost (default 0.0) */
     penalty: number;
+    /** When true, the polygon is treated as non-traversable by the search
+     *  (equivalent to a -1 adjacency) but remains in the mesh so it can be
+     *  toggled back to traversable without rebuilding the CDT.
+     *  Use Mesh.setPolygonBlocked() to toggle. */
+    blocked: boolean;
+    /** Index of the obstacle that this polygon was inside during CDT
+     *  triangulation, or -1 if it's free space.  Used to identify which
+     *  polygons to block/unblock for per-connection obstacle exclusion. */
+    obstacleIndex: number;
 }
 /** A weighted region that the pathfinder prefers to avoid but can traverse */
 interface WeightedRegion {
@@ -222,6 +231,27 @@ declare class Mesh {
     polyContainsPoint(polyIndex: number, p: Point): PolyContainment;
     /** Find where a point is located on the mesh */
     getPointLocation(p: Point): PointLocation;
+    /**
+     * Set a polygon's blocked state. When blocked, the search treats it as
+     * non-traversable (like a -1 adjacency) but the polygon stays in the mesh
+     * so it can be unblocked later without rebuilding the CDT.
+     */
+    setPolygonBlocked(polyIndex: number, blocked: boolean): void;
+    /**
+     * Block or unblock all polygons with a given obstacleIndex.
+     * Use this to toggle obstacle occupancy per-connection:
+     *   mesh.setObstacleBlocked(obstIdx, false)  // unblock for own connection
+     *   // ... pathfind ...
+     *   mesh.setObstacleBlocked(obstIdx, true)   // re-block
+     */
+    setObstacleBlocked(obstacleIdx: number, blocked: boolean): void;
+    /**
+     * Get all unique obstacle indices present in the mesh.
+     * Returns indices of obstacles whose polygons are in the mesh
+     * (obstacleIndex >= 0). Useful for discovering which obstacles
+     * can be toggled.
+     */
+    getObstacleIndices(): number[];
     /** Brute-force point location (for testing/validation) */
     getPointLocationNaive(p: Point): PointLocation;
 }
@@ -330,6 +360,10 @@ interface MeshBuilderInput {
         weight: number;
         penalty: number;
     }[];
+    /** Per-region obstacle index from CDT (-1 = free space).
+     *  When present, regions with obstacleIndex >= 0 will have
+     *  their polygon's `blocked` flag set to true initially. */
+    regionObstacleIndices?: number[];
 }
 /**
  * Build a Polyanya navigation mesh from an array of convex regions.
@@ -351,6 +385,11 @@ interface CdtResult {
         weight: number;
         penalty: number;
     }[];
+    /** Per-region obstacle index: -1 = free space, 0+ = index into the
+     *  obstacles array that the region's centroid falls inside.
+     *  Used to tag mesh polygons so obstacle occupancy can be toggled
+     *  per-polygon without rebuilding the CDT. */
+    regionObstacleIndices: number[];
 }
 /**
  * CDT-triangulate the free space inside `bounds` around obstacle polygons.

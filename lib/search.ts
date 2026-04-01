@@ -178,7 +178,8 @@ export class SearchInstance {
 
     for (const succ of successors) {
       const nextPolygon = P[succ.polyLeftInd]!
-      if (nextPolygon === -1) {
+      // Treat blocked polygons as non-traversable (same as -1 boundary)
+      if (nextPolygon === -1 || (nextPolygon >= 0 && this.mesh.polygons[nextPolygon]!.blocked)) {
         // In goalless mode, non-observable successors at boundary edges still have
         // their turning corner directly visible from source — record its g-value.
         if (this.goalless &&

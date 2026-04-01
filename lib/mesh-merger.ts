@@ -17,6 +17,8 @@ export function mergeMesh(mesh: Mesh): Mesh {
   const area: number[] = new Array(n)
   const weights: number[] = new Array(n)
   const penalties: number[] = new Array(n)
+  const polyBlocked: boolean[] = new Array(n)
+  const polyObstIdx: number[] = new Array(n)
 
   for (let i = 0; i < n; i++) {
     const p = mesh.polygons[i]!
@@ -25,6 +27,8 @@ export function mergeMesh(mesh: Mesh): Mesh {
     area[i] = polyArea(p.vertices, mesh)
     weights[i] = p.weight
     penalties[i] = p.penalty
+    polyBlocked[i] = p.blocked
+    polyObstIdx[i] = p.obstacleIndex
   }
 
   // Union-find
@@ -105,8 +109,9 @@ export function mergeMesh(mesh: Mesh): Mesh {
     const yIdx = resolve(yRaw)
     if (yIdx === -1 || yIdx === xIdx || dead[yIdx]) return false
 
-    // Block merging polygons with different weights
+    // Block merging polygons with different weights or obstacle ownership
     if (weights[xIdx] !== weights[yIdx] || penalties[xIdx] !== penalties[yIdx]) return false
+    if (polyObstIdx[xIdx] !== polyObstIdx[yIdx]) return false
 
     const yV = verts[yIdx]!
     const N = xV.length
@@ -349,7 +354,7 @@ export function mergeMesh(mesh: Mesh): Mesh {
     }
   }
 
-  return rebuildMesh(mesh, verts, nb, dead, weights, penalties)
+  return rebuildMesh(mesh, verts, nb, dead, weights, penalties, polyBlocked, polyObstIdx)
 }
 
 function polyArea(vertexIndices: number[], mesh: Mesh): number {
@@ -370,6 +375,8 @@ function rebuildMesh(
   dead: boolean[],
   weights: number[],
   penalties: number[],
+  blockedArr: boolean[],
+  obstIdxArr: number[],
 ): Mesh {
   const aliveIndices: number[] = []
   const oldToNew: number[] = new Array(verts.length).fill(-1)
@@ -406,7 +413,7 @@ function rebuildMesh(
       if (adj !== -1) { if (foundTrav) isOneWay = false; else foundTrav = true }
     }
 
-    return { vertices: polyVerts, polygons: polyNeigh, isOneWay, minX, maxX, minY, maxY, weight: weights[oldIdx]!, penalty: penalties[oldIdx]! }
+    return { vertices: polyVerts, polygons: polyNeigh, isOneWay, minX, maxX, minY, maxY, weight: weights[oldIdx]!, penalty: penalties[oldIdx]!, blocked: blockedArr[oldIdx]!, obstacleIndex: obstIdxArr[oldIdx]! }
   })
 
   const vertexPolygons: number[][] = new Array(sortedUsedVerts.length)

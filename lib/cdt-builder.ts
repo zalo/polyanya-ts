@@ -8,6 +8,11 @@ import type { Point, WeightedRegion } from "./types.ts"
 export interface CdtResult {
   regions: Point[][]
   regionWeights: { weight: number; penalty: number }[]
+  /** Per-region obstacle index: -1 = free space, 0+ = index into the
+   *  obstacles array that the region's centroid falls inside.
+   *  Used to tag mesh polygons so obstacle occupancy can be toggled
+   *  per-polygon without rebuilding the CDT. */
+  regionObstacleIndices: number[]
 }
 
 /**
@@ -160,24 +165,30 @@ export function cdtTriangulate(input: {
       }
     } catch {
       // CDT is fundamentally broken for this input — return empty result
-      return { regions: [], regionWeights: [] }
+      return { regions: [], regionWeights: [], regionObstacleIndices: [] }
     }
   }
 
-  // --- Filter: remove triangles whose centroid is inside any obstacle ---
+  // --- Classify triangles: free space or inside an obstacle ---
+  // Keep ALL triangles (including obstacle-interior ones) so the mesh
+  // topology is complete and obstacle polygons can be toggled on/off
+  // without rebuilding the CDT.
   const rPts = resolved.pts
-  const filtered = triangles.filter((tri) => {
+  const triObstacleIndex: number[] = []
+  for (const tri of triangles) {
     const [a, b, c] = tri
     const cx = (rPts[a]![0] + rPts[b]![0] + rPts[c]![0]) / 3
     const cy = (rPts[a]![1] + rPts[b]![1] + rPts[c]![1]) / 3
-    return !pointInAnyObstacle(cx, cy, obstacles)
-  })
+    triObstacleIndex.push(getObstacleIndex(cx, cy, obstacles))
+  }
 
   // --- Convert to Point[][] regions with weight assignment ---
   const regions: Point[][] = []
   const regionWeights: { weight: number; penalty: number }[] = []
+  const regionObstacleIndices: number[] = []
 
-  for (const [a, b, c] of filtered) {
+  for (let ti = 0; ti < triangles.length; ti++) {
+    const [a, b, c] = triangles[ti]!
     const pa = { x: rPts[a]![0], y: rPts[a]![1] }
     const pb = { x: rPts[b]![0], y: rPts[b]![1] }
     const pc = { x: rPts[c]![0], y: rPts[c]![1] }
@@ -196,9 +207,10 @@ export function cdtTriangulate(input: {
       }
     }
     regionWeights.push(rw)
+    regionObstacleIndices.push(triObstacleIndex[ti]!)
   }
 
-  return { regions, regionWeights }
+  return { regions, regionWeights, regionObstacleIndices }
 }
 
 /** Ray-casting point-in-polygon test */
@@ -219,6 +231,14 @@ function pointInAnyObstacle(px: number, py: number, obstacles: Point[][]): boole
     if (pointInPolygon(px, py, obstacle)) return true
   }
   return false
+}
+
+/** Returns the index of the first obstacle containing (px,py), or -1. */
+function getObstacleIndex(px: number, py: number, obstacles: Point[][]): number {
+  for (let i = 0; i < obstacles.length; i++) {
+    if (pointInPolygon(px, py, obstacles[i]!)) return i
+  }
+  return -1
 }
 
 /**

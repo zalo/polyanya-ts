@@ -54,11 +54,14 @@ describe("cdtTriangulate with overlapping obstacles", () => {
       octagon(0, 0, 10), // large
       octagon(0, 0, 3),  // fully inside
     ]
-    const { regions } = cdtTriangulate({ bounds, obstacles })
+    const { regions, regionObstacleIndices } = cdtTriangulate({ bounds, obstacles })
     expect(regions.length).toBeGreaterThan(0)
 
-    // No region centroid should be inside the large obstacle
-    for (const region of regions) {
+    // No FREE-SPACE region centroid should be inside the large obstacle.
+    // (Obstacle-interior regions are kept with obstacleIndex >= 0.)
+    for (let ri = 0; ri < regions.length; ri++) {
+      if (regionObstacleIndices[ri]! >= 0) continue // skip obstacle regions
+      const region = regions[ri]!
       let cx = 0
       let cy = 0
       for (const p of region) {
@@ -68,7 +71,6 @@ describe("cdtTriangulate with overlapping obstacles", () => {
       cx /= region.length
       cy /= region.length
       const dist = Math.sqrt(cx * cx + cy * cy)
-      // Centroid should be outside the large obstacle (radius 10)
       expect(dist).toBeGreaterThan(9)
     }
   })
