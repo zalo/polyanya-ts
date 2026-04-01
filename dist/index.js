@@ -2082,7 +2082,22 @@ function cdtTriangulate(input) {
     if (cx < minX - EPS_BOUNDS || cx > maxX + EPS_BOUNDS || cy < minY - EPS_BOUNDS || cy > maxY + EPS_BOUNDS) continue;
     const cross2 = (pb.x - pa.x) * (pc.y - pa.y) - (pb.y - pa.y) * (pc.x - pa.x);
     regions.push(cross2 >= 0 ? [pa, pb, pc] : [pa, pc, pb]);
-    const obstIdx = getObstacleIndex(cx, cy, resolvedObstacles);
+    let obstIdx = getObstacleIndex(cx, cy, resolvedObstacles);
+    if (obstIdx === -1) {
+      const samplePoints = [
+        { x: (pa.x + pb.x) / 2, y: (pa.y + pb.y) / 2 },
+        { x: (pb.x + pc.x) / 2, y: (pb.y + pc.y) / 2 },
+        { x: (pc.x + pa.x) / 2, y: (pc.y + pa.y) / 2 },
+        // Quarter-points (between centroid and each vertex)
+        { x: (cx + pa.x) / 2, y: (cy + pa.y) / 2 },
+        { x: (cx + pb.x) / 2, y: (cy + pb.y) / 2 },
+        { x: (cx + pc.x) / 2, y: (cy + pc.y) / 2 }
+      ];
+      for (const sp of samplePoints) {
+        obstIdx = getObstacleIndex(sp.x, sp.y, resolvedObstacles);
+        if (obstIdx >= 0) break;
+      }
+    }
     regionObstacleIndices.push(obstIdx);
     let rw = { weight: 1, penalty: 0 };
     if (obstIdx === -1) {
