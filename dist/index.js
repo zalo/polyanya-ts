@@ -1975,6 +1975,7 @@ function cdtTriangulate(input) {
       edges.push([side[i], side[i + 1]]);
     }
   }
+  const resolvedObstacles = [];
   for (const obstacle of obstacles) {
     if (obstacle.length < 3) continue;
     const deduped = [];
@@ -1995,13 +1996,13 @@ function cdtTriangulate(input) {
     if (deduped.length < 3) continue;
     ringBoundaries.push(edges.length);
     const ringStart = pts.length;
+    const resolvedObs = [];
     for (let i = 0; i < deduped.length; i++) {
       const p = deduped[i];
-      pts.push([
-        p.x + (i % 7 - 3) * 1e-8,
-        p.y + (i % 5 - 2) * 1e-8
-      ]);
+      pts.push([p.x, p.y]);
+      resolvedObs.push(p);
     }
+    resolvedObstacles.push(resolvedObs);
     for (let i = 0; i < deduped.length; i++) {
       edges.push([ringStart + i, ringStart + (i + 1) % deduped.length]);
     }
@@ -2013,16 +2014,13 @@ function cdtTriangulate(input) {
     if (wr.polygon.length < 3) continue;
     for (let i = 0; i < wr.polygon.length; i++) {
       const p = wr.polygon[i];
-      pts.push([
-        p.x + (i % 7 - 3) * 1e-8,
-        p.y + (i % 5 - 2) * 1e-8
-      ]);
+      pts.push([p.x, p.y]);
     }
   }
   const resolved = resolveConstraintCrossings(pts, edges, ringBoundaries);
   let triangles;
   try {
-    triangles = cdt2d(resolved.pts, resolved.constraintEdges, { exterior: false });
+    triangles = cdt2d(resolved.pts, resolved.constraintEdges, { interior: true, exterior: true });
   } catch {
     const jitteredPts = resolved.pts.map((p, i) => {
       if (i < boundsEnd) return p;
@@ -2032,7 +2030,7 @@ function cdtTriangulate(input) {
       ];
     });
     try {
-      triangles = cdt2d(jitteredPts, resolved.constraintEdges, { exterior: false });
+      triangles = cdt2d(jitteredPts, resolved.constraintEdges, { interior: true, exterior: true });
       for (let i = 0; i < jitteredPts.length; i++) {
         resolved.pts[i] = jitteredPts[i];
       }
@@ -2041,13 +2039,7 @@ function cdtTriangulate(input) {
     }
   }
   const rPts = resolved.pts;
-  const triObstacleIndex = [];
-  for (const tri of triangles) {
-    const [a, b, c] = tri;
-    const cx = (rPts[a][0] + rPts[b][0] + rPts[c][0]) / 3;
-    const cy = (rPts[a][1] + rPts[b][1] + rPts[c][1]) / 3;
-    triObstacleIndex.push(getObstacleIndex(cx, cy, obstacles));
-  }
+  const EPS_BOUNDS = 1e-4;
   const regions = [];
   const regionWeights = [];
   const regionObstacleIndices = [];
@@ -2056,19 +2048,23 @@ function cdtTriangulate(input) {
     const pa = { x: rPts[a][0], y: rPts[a][1] };
     const pb = { x: rPts[b][0], y: rPts[b][1] };
     const pc = { x: rPts[c][0], y: rPts[c][1] };
-    const cross2 = (pb.x - pa.x) * (pc.y - pa.y) - (pb.y - pa.y) * (pc.x - pa.x);
-    regions.push(cross2 >= 0 ? [pa, pb, pc] : [pa, pc, pb]);
     const cx = (pa.x + pb.x + pc.x) / 3;
     const cy = (pa.y + pb.y + pc.y) / 3;
+    if (cx < minX - EPS_BOUNDS || cx > maxX + EPS_BOUNDS || cy < minY - EPS_BOUNDS || cy > maxY + EPS_BOUNDS) continue;
+    const cross2 = (pb.x - pa.x) * (pc.y - pa.y) - (pb.y - pa.y) * (pc.x - pa.x);
+    regions.push(cross2 >= 0 ? [pa, pb, pc] : [pa, pc, pb]);
+    const obstIdx = getObstacleIndex(cx, cy, resolvedObstacles);
+    regionObstacleIndices.push(obstIdx);
     let rw = { weight: 1, penalty: 0 };
-    for (const wr of wrPolygons) {
-      if (pointInPolygon(cx, cy, wr.polygon)) {
-        rw = { weight: wr.weight, penalty: wr.penalty };
-        break;
+    if (obstIdx === -1) {
+      for (const wr of wrPolygons) {
+        if (pointInPolygon(cx, cy, wr.polygon)) {
+          rw = { weight: wr.weight, penalty: wr.penalty };
+          break;
+        }
       }
     }
     regionWeights.push(rw);
-    regionObstacleIndices.push(triObstacleIndex[ti]);
   }
   return { regions, regionWeights, regionObstacleIndices };
 }

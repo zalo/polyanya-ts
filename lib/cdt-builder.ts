@@ -81,6 +81,10 @@ export function cdtTriangulate(input: {
   }
 
   // --- Obstacle polygon rings ---
+  // Track the actual jittered coordinates used in the CDT so we can
+  // test centroid containment against the SAME geometry (not the
+  // pre-jitter originals which may differ slightly at boundaries).
+  const resolvedObstacles: Point[][] = []
   for (const obstacle of obstacles) {
     if (obstacle.length < 3) continue
 
@@ -106,14 +110,13 @@ export function cdtTriangulate(input: {
 
     ringBoundaries.push(edges.length)
     const ringStart = pts.length
-    // Add tiny jitter to prevent degenerate collinear inputs
+    const resolvedObs: Point[] = []
     for (let i = 0; i < deduped.length; i++) {
       const p = deduped[i]!
-      pts.push([
-        p.x + ((i % 7) - 3) * 1e-8,
-        p.y + ((i % 5) - 2) * 1e-8,
-      ])
+      pts.push([p.x, p.y])
+      resolvedObs.push(p)
     }
+    resolvedObstacles.push(resolvedObs)
     // Constraint edges forming the closed ring
     for (let i = 0; i < deduped.length; i++) {
       edges.push([ringStart + i, ringStart + (i + 1) % deduped.length])
@@ -132,10 +135,7 @@ export function cdtTriangulate(input: {
     if (wr.polygon.length < 3) continue
     for (let i = 0; i < wr.polygon.length; i++) {
       const p = wr.polygon[i]!
-      pts.push([
-        p.x + ((i % 7) - 3) * 1e-8,
-        p.y + ((i % 5) - 2) * 1e-8,
-      ])
+      pts.push([p.x, p.y])
     }
   }
 
@@ -147,7 +147,7 @@ export function cdtTriangulate(input: {
   // very close points). Retry with progressively more jitter if it fails.
   let triangles: [number, number, number][]
   try {
-    triangles = cdt2d(resolved.pts, resolved.constraintEdges, { exterior: false })
+    triangles = cdt2d(resolved.pts, resolved.constraintEdges, { interior: true, exterior: true })
   } catch {
     // Retry with stronger random jitter on all non-bounds points
     const jitteredPts = resolved.pts.map((p, i) => {
@@ -158,7 +158,7 @@ export function cdtTriangulate(input: {
       ] as [number, number]
     })
     try {
-      triangles = cdt2d(jitteredPts, resolved.constraintEdges, { exterior: false })
+      triangles = cdt2d(jitteredPts, resolved.constraintEdges, { interior: true, exterior: true })
       // Update resolved.pts so downstream uses the jittered version
       for (let i = 0; i < jitteredPts.length; i++) {
         resolved.pts[i] = jitteredPts[i]!
@@ -169,18 +169,14 @@ export function cdtTriangulate(input: {
     }
   }
 
-  // --- Classify triangles: free space or inside an obstacle ---
-  // Keep ALL triangles (including obstacle-interior ones) so the mesh
-  // topology is complete and obstacle polygons can be toggled on/off
-  // without rebuilding the CDT.
+  // --- Classify triangles ---
+  // CDT runs with interior:true, exterior:true so we get ALL triangles
+  // including obstacle-interior and exterior. Classify each by centroid:
+  //   outside bounds → discard (exterior)
+  //   inside obstacle i → tag obstacleIndex=i (blocked by default)
+  //   free space → tag obstacleIndex=-1
   const rPts = resolved.pts
-  const triObstacleIndex: number[] = []
-  for (const tri of triangles) {
-    const [a, b, c] = tri
-    const cx = (rPts[a]![0] + rPts[b]![0] + rPts[c]![0]) / 3
-    const cy = (rPts[a]![1] + rPts[b]![1] + rPts[c]![1]) / 3
-    triObstacleIndex.push(getObstacleIndex(cx, cy, obstacles))
-  }
+  const EPS_BOUNDS = 1e-4
 
   // --- Convert to Point[][] regions with weight assignment ---
   const regions: Point[][] = []
@@ -192,22 +188,32 @@ export function cdtTriangulate(input: {
     const pa = { x: rPts[a]![0], y: rPts[a]![1] }
     const pb = { x: rPts[b]![0], y: rPts[b]![1] }
     const pc = { x: rPts[c]![0], y: rPts[c]![1] }
+    const cx = (pa.x + pb.x + pc.x) / 3
+    const cy = (pa.y + pb.y + pc.y) / 3
+
+    // Discard exterior triangles (outside bounds)
+    if (cx < minX - EPS_BOUNDS || cx > maxX + EPS_BOUNDS ||
+        cy < minY - EPS_BOUNDS || cy > maxY + EPS_BOUNDS) continue
+
     // Ensure CCW winding
     const cross = (pb.x - pa.x) * (pc.y - pa.y) - (pb.y - pa.y) * (pc.x - pa.x)
     regions.push(cross >= 0 ? [pa, pb, pc] : [pa, pc, pb])
 
-    // Determine weight from weighted regions (test centroid)
-    const cx = (pa.x + pb.x + pc.x) / 3
-    const cy = (pa.y + pb.y + pc.y) / 3
+    // Classify: inside an obstacle or free space?
+    const obstIdx = getObstacleIndex(cx, cy, resolvedObstacles)
+    regionObstacleIndices.push(obstIdx)
+
+    // Determine weight from weighted regions (free-space only)
     let rw = { weight: 1, penalty: 0 }
-    for (const wr of wrPolygons) {
-      if (pointInPolygon(cx, cy, wr.polygon)) {
-        rw = { weight: wr.weight, penalty: wr.penalty }
-        break
+    if (obstIdx === -1) {
+      for (const wr of wrPolygons) {
+        if (pointInPolygon(cx, cy, wr.polygon)) {
+          rw = { weight: wr.weight, penalty: wr.penalty }
+          break
+        }
       }
     }
     regionWeights.push(rw)
-    regionObstacleIndices.push(triObstacleIndex[ti]!)
   }
 
   return { regions, regionWeights, regionObstacleIndices }
