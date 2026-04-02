@@ -322,6 +322,13 @@ declare class SearchInstance {
     private succToNode;
     /** Generate initial search nodes from the start point */
     private genInitialNodes;
+    /** Obstacle indices temporarily unblocked for this search */
+    private unblockedObstacles;
+    /**
+     * Find which obstacle contains a point by checking all blocked polygons.
+     * Returns the obstacleIndex or -1 if the point isn't inside any obstacle.
+     */
+    private findContainingObstacle;
     private initSearch;
     /** Maximum search time in milliseconds (0 = unlimited) */
     timeLimitMs: number;
@@ -330,6 +337,8 @@ declare class SearchInstance {
      * Returns true if a path was found, false otherwise.
      */
     search(): boolean;
+    /** Re-block any obstacles that were temporarily unblocked for start/goal */
+    private reblockObstacles;
     /**
      * Start a stepping search. Call `step()` repeatedly to advance.
      * Returns the initial step events.

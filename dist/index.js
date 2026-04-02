@@ -1450,6 +1450,29 @@ var SearchInstance = class {
       }
     }
   }
+  /** Obstacle indices temporarily unblocked for this search */
+  unblockedObstacles = [];
+  /**
+   * Find which obstacle contains a point by checking all blocked polygons.
+   * Returns the obstacleIndex or -1 if the point isn't inside any obstacle.
+   */
+  findContainingObstacle(p) {
+    for (let i = 0; i < this.mesh.polygons.length; i++) {
+      const poly = this.mesh.polygons[i];
+      if (!poly.blocked || poly.obstacleIndex < 0) continue;
+      const verts = poly.vertices;
+      let inside = false;
+      for (let vi = 0, vj = verts.length - 1; vi < verts.length; vj = vi++) {
+        const pi = this.mesh.vertices[verts[vi]].p;
+        const pj = this.mesh.vertices[verts[vj]].p;
+        if (pi.y > p.y !== pj.y > p.y && p.x < (pj.x - pi.x) * (p.y - pi.y) / (pj.y - pi.y) + pi.x) {
+          inside = !inside;
+        }
+      }
+      if (inside) return poly.obstacleIndex;
+    }
+    return -1;
+  }
   initSearch() {
     this.searchId++;
     this.openList.clear();
@@ -1460,6 +1483,38 @@ var SearchInstance = class {
     this.nodesPrunedPostPop = 0;
     this.successorCalls = 0;
     this.stepEvents = [];
+    for (const oi of this.unblockedObstacles) {
+      this.mesh.setObstacleBlocked(oi, true);
+    }
+    this.unblockedObstacles = [];
+    const startLoc1 = this.resolvePointLocation(this.start);
+    if (startLoc1.poly1 >= 0 && this.mesh.polygons[startLoc1.poly1]?.blocked) {
+      const obstIdx = this.mesh.polygons[startLoc1.poly1].obstacleIndex;
+      if (obstIdx >= 0) {
+        this.mesh.setObstacleBlocked(obstIdx, false);
+        this.unblockedObstacles.push(obstIdx);
+      }
+    } else if (startLoc1.poly1 === -1) {
+      const obstIdx = this.findContainingObstacle(this.start);
+      if (obstIdx >= 0) {
+        this.mesh.setObstacleBlocked(obstIdx, false);
+        this.unblockedObstacles.push(obstIdx);
+      }
+    }
+    const goalLoc1 = this.resolvePointLocation(this.goal);
+    if (goalLoc1.poly1 >= 0 && this.mesh.polygons[goalLoc1.poly1]?.blocked) {
+      const obstIdx = this.mesh.polygons[goalLoc1.poly1].obstacleIndex;
+      if (obstIdx >= 0) {
+        this.mesh.setObstacleBlocked(obstIdx, false);
+        this.unblockedObstacles.push(obstIdx);
+      }
+    } else if (goalLoc1.poly1 === -1) {
+      const obstIdx = this.findContainingObstacle(this.goal);
+      if (obstIdx >= 0) {
+        this.mesh.setObstacleBlocked(obstIdx, false);
+        this.unblockedObstacles.push(obstIdx);
+      }
+    }
     this.setEndPolygon();
     this.startPolygon = this.resolvePointLocation(this.start).poly1;
     if (!this.mesh.sameIsland(this.startPolygon, this.endPolygon)) return;
@@ -1474,9 +1529,24 @@ var SearchInstance = class {
   search() {
     this.stepMode = false;
     this.initSearch();
-    if (this.endPolygon === -1) return false;
-    if (this.finalNode !== null) return true;
-    return this.runSearchLoop();
+    if (this.endPolygon === -1) {
+      this.reblockObstacles();
+      return false;
+    }
+    if (this.finalNode !== null) {
+      this.reblockObstacles();
+      return true;
+    }
+    const result = this.runSearchLoop();
+    this.reblockObstacles();
+    return result;
+  }
+  /** Re-block any obstacles that were temporarily unblocked for start/goal */
+  reblockObstacles() {
+    for (const oi of this.unblockedObstacles) {
+      this.mesh.setObstacleBlocked(oi, true);
+    }
+    this.unblockedObstacles = [];
   }
   /**
    * Start a stepping search. Call `step()` repeatedly to advance.
