@@ -250,6 +250,15 @@ declare class Mesh {
      *   mesh.setObstacleBlocked(obstIdx, true)   // re-block
      */
     setObstacleBlocked(obstacleIdx: number, blocked: boolean): void;
+    /**
+     * Set blocked state for an obstacle WITHOUT rebuilding vertex adjacency.
+     * Call `finishBlockedChanges()` once after all batch changes are done.
+     * Much faster than calling `setObstacleBlocked` per-obstacle when
+     * toggling multiple obstacles at once.
+     */
+    setObstacleBlockedBatch(obstacleIdx: number, blocked: boolean): void;
+    /** Rebuild vertex adjacency after batch `setObstacleBlockedBatch` calls. */
+    finishBlockedChanges(): void;
     /** Rebuild all vertex/polygon adjacency and flags based on current
      *  polygon blocked states. Called after setObstacleBlocked. */
     private rebuildVertexAdjacency;

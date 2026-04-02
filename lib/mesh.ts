@@ -533,8 +533,25 @@ export class Mesh {
         this.polygons[i]!.blocked = blocked
       }
     }
-    // Rebuild vertex adjacency: blocked polygons appear as -1 in vertex
-    // polygon lists, and vertex isCorner/isAmbig flags are recomputed.
+    this.rebuildVertexAdjacency()
+  }
+
+  /**
+   * Set blocked state for an obstacle WITHOUT rebuilding vertex adjacency.
+   * Call `finishBlockedChanges()` once after all batch changes are done.
+   * Much faster than calling `setObstacleBlocked` per-obstacle when
+   * toggling multiple obstacles at once.
+   */
+  setObstacleBlockedBatch(obstacleIdx: number, blocked: boolean): void {
+    for (let i = 0; i < this.polygons.length; i++) {
+      if (this.polygons[i]!.obstacleIndex === obstacleIdx) {
+        this.polygons[i]!.blocked = blocked
+      }
+    }
+  }
+
+  /** Rebuild vertex adjacency after batch `setObstacleBlockedBatch` calls. */
+  finishBlockedChanges(): void {
     this.rebuildVertexAdjacency()
   }
 
