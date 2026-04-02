@@ -586,9 +586,39 @@ var Mesh = class _Mesh {
       }
     }
   }
-  /** Rebuild vertex adjacency after batch `setObstacleBlockedBatch` calls. */
+  /** Rebuild vertex adjacency after batch `setObstacleBlockedBatch` calls.
+   *  Skips the expensive slab index + island rebuild (positions don't change,
+   *  and islands use original adjacency which is unaffected by blocked state). */
   finishBlockedChanges() {
-    this.rebuildVertexAdjacency();
+    for (const v of this.vertices) {
+      for (let i = 0; i < v.originalPolygons.length; i++) {
+        const pi = v.originalPolygons[i];
+        v.polygons[i] = pi >= 0 && this.polygons[pi]?.blocked ? -1 : pi;
+      }
+      let isCorner = false;
+      let isAmbig = false;
+      for (const pi of v.polygons) {
+        if (pi === -1) {
+          if (isCorner) isAmbig = true;
+          else isCorner = true;
+        }
+      }
+      v.isCorner = isCorner;
+      v.isAmbig = isAmbig;
+    }
+    for (const poly of this.polygons) {
+      let ft = false;
+      poly.isOneWay = true;
+      for (const adj of poly.polygons) {
+        const isTraversable = adj !== -1 && !this.polygons[adj]?.blocked;
+        if (isTraversable) {
+          if (ft) {
+            poly.isOneWay = false;
+            break;
+          } else ft = true;
+        }
+      }
+    }
   }
   /** Rebuild all vertex/polygon adjacency and flags based on current
    *  polygon blocked states. Called after setObstacleBlocked. */

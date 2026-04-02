@@ -550,9 +550,43 @@ export class Mesh {
     }
   }
 
-  /** Rebuild vertex adjacency after batch `setObstacleBlockedBatch` calls. */
+  /** Rebuild vertex adjacency after batch `setObstacleBlockedBatch` calls.
+   *  Skips the expensive slab index + island rebuild (positions don't change,
+   *  and islands use original adjacency which is unaffected by blocked state). */
   finishBlockedChanges(): void {
-    this.rebuildVertexAdjacency()
+    // Rebuild vertex polygon lists (blocked → -1) and corner flags
+    for (const v of this.vertices) {
+      for (let i = 0; i < v.originalPolygons.length; i++) {
+        const pi = v.originalPolygons[i]!
+        v.polygons[i] = (pi >= 0 && this.polygons[pi]?.blocked) ? -1 : pi
+      }
+      let isCorner = false
+      let isAmbig = false
+      for (const pi of v.polygons) {
+        if (pi === -1) {
+          if (isCorner) isAmbig = true
+          else isCorner = true
+        }
+      }
+      v.isCorner = isCorner
+      v.isAmbig = isAmbig
+    }
+    // Recompute isOneWay for all polygons
+    for (const poly of this.polygons) {
+      let ft = false
+      poly.isOneWay = true
+      for (const adj of poly.polygons) {
+        const isTraversable = adj !== -1 && !(this.polygons[adj]?.blocked)
+        if (isTraversable) {
+          if (ft) { poly.isOneWay = false; break }
+          else ft = true
+        }
+      }
+    }
+    // NOTE: slab index and islands are NOT rebuilt here because:
+    // - Polygon positions haven't changed (same CDT)
+    // - Islands use original adjacency (unaffected by blocked state)
+    // If you need full rebuild, call setObstacleBlocked() instead.
   }
 
   /** Rebuild all vertex/polygon adjacency and flags based on current

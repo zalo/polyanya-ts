@@ -257,7 +257,9 @@ declare class Mesh {
      * toggling multiple obstacles at once.
      */
     setObstacleBlockedBatch(obstacleIdx: number, blocked: boolean): void;
-    /** Rebuild vertex adjacency after batch `setObstacleBlockedBatch` calls. */
+    /** Rebuild vertex adjacency after batch `setObstacleBlockedBatch` calls.
+     *  Skips the expensive slab index + island rebuild (positions don't change,
+     *  and islands use original adjacency which is unaffected by blocked state). */
     finishBlockedChanges(): void;
     /** Rebuild all vertex/polygon adjacency and flags based on current
      *  polygon blocked states. Called after setObstacleBlocked. */
