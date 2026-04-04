@@ -424,6 +424,47 @@ export class SearchInstance {
   private unblockedObstacles: number[] = []
 
   /**
+   * Unblock an obstacle and flood-fill: if the unblocked polygon's neighbors
+   * are ALL blocked, also unblock those neighbors' obstacles, recursively,
+   * until we reach at least one free-space polygon. This ensures the
+   * start/goal isn't trapped inside a cluster of adjacent pad obstacles.
+   */
+  private unblockWithFloodFill(obstacleIdx: number): void {
+    if (this.unblockedObstacles.includes(obstacleIdx)) return
+    this.mesh.setObstacleBlocked(obstacleIdx, false)
+    this.unblockedObstacles.push(obstacleIdx)
+
+    // Check all polygons we just unblocked — if any have only blocked/boundary
+    // neighbors, flood-fill into those neighbors' obstacles too
+    for (let pi = 0; pi < this.mesh.polygons.length; pi++) {
+      const poly = this.mesh.polygons[pi]!
+      if (poly.obstacleIndex !== obstacleIdx) continue
+      if (poly.blocked) continue // wasn't part of this obstacle
+
+      let hasFreePath = false
+      for (const adj of poly.polygons) {
+        if (adj === -1) continue
+        const adjPoly = this.mesh.polygons[adj]!
+        if (!adjPoly.blocked) {
+          hasFreePath = true
+          break
+        }
+      }
+
+      if (!hasFreePath) {
+        // All neighbors blocked — unblock adjacent obstacles to create an exit
+        for (const adj of poly.polygons) {
+          if (adj === -1) continue
+          const adjPoly = this.mesh.polygons[adj]!
+          if (adjPoly.blocked && adjPoly.obstacleIndex >= 0) {
+            this.unblockWithFloodFill(adjPoly.obstacleIndex)
+          }
+        }
+      }
+    }
+  }
+
+  /**
    * Find which obstacle contains a point by checking all blocked polygons.
    * Returns the obstacleIndex or -1 if the point isn't inside any obstacle.
    */
@@ -465,45 +506,49 @@ export class SearchInstance {
     }
     this.unblockedObstacles = []
 
-    // Check if start is inside a blocked obstacle — if so, unblock it
+    // Check if start is inside a blocked obstacle — unblock it and flood-fill
+    // to ensure the path can escape through adjacent blocked obstacles
     const startLoc1 = this.resolvePointLocation(this.start)
     if (startLoc1.poly1 >= 0 && this.mesh.polygons[startLoc1.poly1]?.blocked) {
       const obstIdx = this.mesh.polygons[startLoc1.poly1]!.obstacleIndex
-      if (obstIdx >= 0) {
-        this.mesh.setObstacleBlocked(obstIdx, false)
-        this.unblockedObstacles.push(obstIdx)
-      }
+      if (obstIdx >= 0) this.unblockWithFloodFill(obstIdx)
     } else if (startLoc1.poly1 === -1) {
-      // Truly not on mesh — try findContainingObstacle as fallback
       const obstIdx = this.findContainingObstacle(this.start)
-      if (obstIdx >= 0) {
-        this.mesh.setObstacleBlocked(obstIdx, false)
-        this.unblockedObstacles.push(obstIdx)
-      }
+      if (obstIdx >= 0) this.unblockWithFloodFill(obstIdx)
     }
 
-    // Check if goal is inside a blocked obstacle — if so, unblock it
+    // Same for goal
     const goalLoc1 = this.resolvePointLocation(this.goal)
     if (goalLoc1.poly1 >= 0 && this.mesh.polygons[goalLoc1.poly1]?.blocked) {
       const obstIdx = this.mesh.polygons[goalLoc1.poly1]!.obstacleIndex
-      if (obstIdx >= 0) {
-        this.mesh.setObstacleBlocked(obstIdx, false)
-        this.unblockedObstacles.push(obstIdx)
-      }
+      if (obstIdx >= 0) this.unblockWithFloodFill(obstIdx)
     } else if (goalLoc1.poly1 === -1) {
       const obstIdx = this.findContainingObstacle(this.goal)
-      if (obstIdx >= 0) {
-        this.mesh.setObstacleBlocked(obstIdx, false)
-        this.unblockedObstacles.push(obstIdx)
-      }
+      if (obstIdx >= 0) this.unblockWithFloodFill(obstIdx)
     }
 
     // Now resolve with obstacles unblocked
     this.setEndPolygon()
     this.startPolygon = this.resolvePointLocation(this.start).poly1
 
-    // Skip search if start and goal are on disconnected islands
-    if (!this.mesh.sameIsland(this.startPolygon, this.endPolygon)) return
+    // Expose debug info for the calling app's overlay
+    if (this.unblockedObstacles.length > 0) {
+      const sp = this.startPolygon
+      const ep = this.endPolygon
+      const spBlk = sp >= 0 ? this.mesh.polygons[sp]?.blocked : undefined
+      const epBlk = ep >= 0 ? this.mesh.polygons[ep]?.blocked : undefined
+      // Show start polygon's neighbors and their blocked status
+      const spNeigh = sp >= 0 ? this.mesh.polygons[sp]!.polygons.map(
+        (n: number) => n === -1 ? "-1" : `${n}(${this.mesh.polygons[n]?.blocked ? "B" : "F"})`
+      ).join(",") : "?"
+      ;(this as any)._lastDebug = `unblk=[${this.unblockedObstacles}] sp=${sp}(${spBlk}) ep=${ep}(${epBlk}) spN=[${spNeigh}]`
+    }
+
+    // Skip search if start and goal are on disconnected islands.
+    // BUT: if we unblocked obstacles, the island map is stale — skip this check
+    // and let the search discover disconnection naturally.
+    if (this.unblockedObstacles.length === 0 &&
+        !this.mesh.sameIsland(this.startPolygon, this.endPolygon)) return
 
     this.genInitialNodes()
   }
